@@ -30,7 +30,9 @@
     expandedCategoryIds: {},
     historySearch: "",
     historyCategory: "all",
-    pendingImport: null
+    pendingImport: null,
+    auditLocation: null,
+    auditChecked: {}
   };
 
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -529,6 +531,10 @@
     openBatchSheet(row.dataset.id, "direct", state.viewingId);
   });
 
+  document.getElementById("viewAddBatchBtn").addEventListener("click", function () {
+    openBatchSheet(null, "direct", state.viewingId);
+  });
+
   function openView(id) {
     var item = state.items.find(function (it) { return it.id === id; });
     if (!item) return;
@@ -735,13 +741,23 @@
 
     if (state.batchEditContext === "direct") {
       var item = state.items.find(function (it) { return it.id === state.batchEditItemId; });
+      var newBatch = null;
       if (item) {
-        var db = item.batches.find(function (x) { return x.id === state.editingBatchId; });
-        if (db) { db.quantity = qty; db.expiry = expiry; db.expiryType = type; db.openDate = openDate; db.location = location; }
+        if (state.editingBatchId) {
+          var db = item.batches.find(function (x) { return x.id === state.editingBatchId; });
+          if (db) { db.quantity = qty; db.expiry = expiry; db.expiryType = type; db.openDate = openDate; db.location = location; }
+        } else {
+          newBatch = { id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, location: location };
+          item.batches.push(newBatch);
+        }
         item.updatedAt = new Date().toISOString();
         saveItems();
         renderViewBatches(item);
         render();
+        if (newBatch && !locationAuditSheet.hidden && state.auditLocation) {
+          state.auditChecked[newBatch.id] = true;
+          renderAuditChecklist();
+        }
       }
     } else {
       if (state.editingBatchId) {
@@ -1295,6 +1311,158 @@
     importOptionsSheet.hidden = true;
     render();
   });
+
+  // ---------- location audit ----------
+
+  var locationAuditSheet = document.getElementById("locationAuditSheet");
+  var auditListEl = document.getElementById("auditList");
+  var auditMissingListEl = document.getElementById("auditMissingList");
+
+  function getBatchesAtLocation(location) {
+    var out = [];
+    state.items.forEach(function (item) {
+      item.batches.forEach(function (b) {
+        if (b.location === location) out.push({ item: item, batch: b });
+      });
+    });
+    return out;
+  }
+
+  function renderAuditLocationChips() {
+    var container = document.getElementById("auditLocationChips");
+    var locs = allKnownLocations();
+    if (!locs.length) {
+      container.innerHTML = '<p class="settings-desc">No locations recorded yet — add a location to a batch first.</p>';
+      return;
+    }
+    container.innerHTML = locs.map(function (loc) {
+      return '<button type="button" class="chip" data-location="' + escapeHtml(loc) + '">' + escapeHtml(loc) + '</button>';
+    }).join("");
+  }
+
+  function renderAuditItemSuggestions() {
+    var dl = document.getElementById("auditItemSuggestions");
+    dl.innerHTML = state.items.map(function (it) { return '<option value="' + escapeHtml(it.name) + '"></option>'; }).join("");
+  }
+
+  function renderAuditMissing(entries) {
+    var missing = entries.filter(function (e) { return !state.auditChecked[e.batch.id]; });
+    var section = document.getElementById("auditMissingSection");
+    if (missing.length === 0) { section.hidden = true; return; }
+    section.hidden = false;
+    auditMissingListEl.innerHTML = missing.map(function (e) {
+      return '<li class="category-row">' +
+        '<div class="category-row-main">' +
+          '<span class="category-name">' + escapeHtml(e.item.name) + '</span>' +
+          '<span class="category-count">' + formatQty(e.batch.quantity) + (e.item.unit ? " " + e.item.unit : "") + '</span>' +
+          '<button type="button" class="btn-danger audit-remove" data-item-id="' + e.item.id + '" data-batch-id="' + e.batch.id + '">Remove</button>' +
+          '<button type="button" class="btn-secondary audit-move" data-item-id="' + e.item.id + '" data-batch-id="' + e.batch.id + '">Move</button>' +
+        '</div>' +
+      '</li>';
+    }).join("");
+  }
+
+  function renderAuditChecklist() {
+    var entries = getBatchesAtLocation(state.auditLocation);
+    var checkedCount = entries.filter(function (e) { return state.auditChecked[e.batch.id]; }).length;
+    document.getElementById("auditProgressLine").textContent =
+      'Checking "' + state.auditLocation + '" — ' + checkedCount + " of " + entries.length + " found so far.";
+
+    auditListEl.innerHTML = entries.map(function (e) {
+      var checked = !!state.auditChecked[e.batch.id];
+      var eff = getBatchEffectiveDate(e.item, e.batch);
+      var status = eff ? expiryStatus(eff.date, eff.type, true) : { label: "", cls: "" };
+      var qtyText = formatQty(e.batch.quantity) + (e.item.unit ? " " + e.item.unit : "");
+      return '<li class="batch-row">' +
+        '<input type="checkbox" class="audit-check" data-batch-id="' + e.batch.id + '"' + (checked ? " checked" : "") + '>' +
+        '<span class="batch-qty">' + escapeHtml(e.item.name) + '</span>' +
+        '<span class="batch-expiry ' + status.cls + '">' + qtyText + (status.label ? " · " + status.label : "") + '</span>' +
+      '</li>';
+    }).join("");
+
+    renderAuditMissing(entries);
+  }
+
+  function startAudit(location) {
+    state.auditLocation = location;
+    state.auditChecked = {};
+    document.getElementById("auditPickLocation").hidden = true;
+    document.getElementById("auditChecklist").hidden = false;
+    renderAuditItemSuggestions();
+    renderAuditChecklist();
+  }
+
+  function openLocationAudit() {
+    settingsSheet.hidden = true;
+    state.auditLocation = null;
+    state.auditChecked = {};
+    document.getElementById("auditPickLocation").hidden = false;
+    document.getElementById("auditChecklist").hidden = true;
+    renderAuditLocationChips();
+    locationAuditSheet.hidden = false;
+  }
+
+  document.getElementById("startAuditBtn").addEventListener("click", openLocationAudit);
+  document.getElementById("auditLocationChips").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip"); if (!btn) return;
+    startAudit(btn.dataset.location);
+  });
+
+  auditListEl.addEventListener("change", function (e) {
+    if (!e.target.classList.contains("audit-check")) return;
+    state.auditChecked[e.target.dataset.batchId] = e.target.checked;
+    renderAuditChecklist();
+  });
+
+  document.getElementById("auditAddItemBtn").addEventListener("click", function () {
+    var name = document.getElementById("auditAddItemInput").value.trim();
+    if (!name) return;
+    var item = state.items.find(function (it) { return it.name.toLowerCase() === name.toLowerCase(); });
+    if (!item) {
+      alert('No item named "' + name + '" found. Add it as a new item from the main list first, then log it here.');
+      return;
+    }
+    openBatchSheet(null, "direct", item.id);
+    document.getElementById("batchLocation").value = state.auditLocation;
+    document.getElementById("auditAddItemInput").value = "";
+  });
+
+  auditMissingListEl.addEventListener("click", function (e) {
+    var removeBtn = e.target.closest(".audit-remove");
+    if (removeBtn) {
+      if (!confirm("Remove this batch? This can't be undone.")) return;
+      var item = state.items.find(function (it) { return it.id === removeBtn.dataset.itemId; });
+      if (item) {
+        item.batches = item.batches.filter(function (b) { return b.id !== removeBtn.dataset.batchId; });
+        item.updatedAt = new Date().toISOString();
+        saveItems();
+        render();
+        renderAuditChecklist();
+      }
+      return;
+    }
+    var moveBtn = e.target.closest(".audit-move");
+    if (moveBtn) {
+      var newLoc = prompt("Move this batch to which location?");
+      if (!newLoc || !newLoc.trim()) return;
+      var item2 = state.items.find(function (it) { return it.id === moveBtn.dataset.itemId; });
+      if (item2) {
+        var b2 = item2.batches.find(function (x) { return x.id === moveBtn.dataset.batchId; });
+        if (b2) {
+          b2.location = newLoc.trim();
+          item2.updatedAt = new Date().toISOString();
+          saveItems();
+          render();
+          renderAuditChecklist();
+        }
+      }
+      return;
+    }
+  });
+
+  document.getElementById("auditFinishBtn").addEventListener("click", function () { locationAuditSheet.hidden = true; });
+  document.getElementById("auditCloseBtn").addEventListener("click", function () { locationAuditSheet.hidden = true; });
+  locationAuditSheet.addEventListener("click", function (e) { if (e.target === locationAuditSheet) locationAuditSheet.hidden = true; });
 
   // ---------- settings sheet ----------
 

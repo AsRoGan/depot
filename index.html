@@ -46,6 +46,7 @@
     <h2 id="viewItemName"></h2>
     <p class="settings-desc" id="viewItemMeta"></p>
     <ul id="viewBatchList" class="batch-list"></ul>
+    <button type="button" id="viewAddBatchBtn" class="btn-secondary">Add batch</button>
     <p class="settings-desc" id="viewNotesLine" hidden></p>
     <div class="sheet-actions">
       <button type="button" id="viewDeleteBtn" class="btn-danger">Delete</button>
@@ -256,6 +257,39 @@
   </form>
 </div>
 
+<!-- Location audit sheet -->
+<div id="locationAuditSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Location check</h2>
+
+    <div id="auditPickLocation">
+      <p class="settings-desc">Choose a location to check against what's on the shelf.</p>
+      <div class="chips" id="auditLocationChips"></div>
+    </div>
+
+    <div id="auditChecklist" hidden>
+      <p class="settings-desc" id="auditProgressLine"></p>
+      <ul id="auditList" class="batch-list"></ul>
+
+      <div class="add-category-form">
+        <input type="text" id="auditAddItemInput" list="auditItemSuggestions" placeholder="Add an item found here">
+        <datalist id="auditItemSuggestions"></datalist>
+        <button type="button" id="auditAddItemBtn" class="btn-secondary">Add batch here</button>
+      </div>
+
+      <div id="auditMissingSection" hidden>
+        <p class="stat-section-label">Not found — remove or move?</p>
+        <ul id="auditMissingList" class="category-manage-list"></ul>
+      </div>
+
+      <button type="button" id="auditFinishBtn" class="btn-primary">Finish check</button>
+    </div>
+
+    <button id="auditCloseBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
 <!-- Settings sheet -->
 <div id="settingsSheet" class="sheet-backdrop" hidden>
   <div class="sheet">
@@ -264,6 +298,7 @@
     <p class="settings-desc">Everything is stored only on this device. Back up your list before reinstalling or switching devices.</p>
     <div class="settings-actions">
       <button id="manageCategoriesBtn" class="btn-secondary">Manage categories</button>
+      <button id="startAuditBtn" class="btn-secondary">Location check</button>
       <button id="adjustThresholdsBtn" class="btn-secondary">Adjust thresholds</button>
       <button id="statsBtn" class="btn-secondary">View stats</button>
       <button id="historyBtn" class="btn-secondary">View withdrawal history</button>

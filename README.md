@@ -230,3 +230,13 @@ The exported file contains `items`, `history`, `categories`, and
 - **Orientation lock removed** — landscape now works.
 
 Still to come in later passes: location filter chips, shopping list generation (using reorder threshold + depleted + near-expiry), Web Share for the shopping list, CSV export, the location audit/stocktake workflow, and camera-based barcode scanning.
+
+## Location check (audit)
+
+**Settings → Location check** — pick a location, and every batch currently
+recorded there shows as a tickable checklist that stays on screen the whole
+time (no per-item popups breaking your flow). Tick off what you physically
+find; anything left unticked gets a **Remove** or **Move** button right in
+the same list. "Add batch here" logs something you found that wasn't
+expected — type an existing item's name and it opens straight to adding a
+batch with this location pre-filled, auto-marked as found.
