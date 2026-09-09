@@ -1,9 +1,11 @@
-var CACHE_NAME = "depot-cache-v1";
+var CACHE_NAME = "depot-cache-v2";
 var FILES_TO_CACHE = [
   "./index.html",
   "./style.css",
   "./app.js",
-  "./manifest.json"
+  "./manifest.json",
+  "./icon-192.png",
+  "./icon-512.png"
 ];
 
 self.addEventListener("install", function (event) {
