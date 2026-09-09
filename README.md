@@ -240,3 +240,18 @@ find; anything left unticked gets a **Remove** or **Move** button right in
 the same list. "Add batch here" logs something you found that wasn't
 expected — type an existing item's name and it opens straight to adding a
 batch with this location pre-filled, auto-marked as found.
+
+## Location filter
+
+A location chip row (mirroring the category chips) appears on the main list
+whenever any batch has a location set — filters to items with at least one
+batch there.
+
+## Shopping list
+
+**Settings → Generate shopping list** — choose which criteria count (depleted,
+at/below reorder threshold, expiring soon), generate, and the results group
+by category with the reason each item was included. **Copy** puts a plain-text
+version on the clipboard; **Share** uses the device's native share sheet
+(texting it, emailing it, dropping it in a notes app) where supported, and
+falls back to clipboard copy elsewhere.

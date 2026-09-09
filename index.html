@@ -19,6 +19,7 @@
   <input id="searchInput" class="search-input" type="text" placeholder="Search your stores" aria-label="Search">
   <div class="chips" id="categoryChips"></div>
   <div class="chips" id="subCategoryChips" hidden></div>
+  <div class="chips" id="locationChips" hidden></div>
   <label class="soon-toggle">
     <input type="checkbox" id="soonToggle">
     Expiring soon only
@@ -290,6 +291,30 @@
   </div>
 </div>
 
+<!-- Shopping list sheet -->
+<div id="shoppingListSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Shopping list</h2>
+    <div class="settings-actions">
+      <label class="soon-toggle"><input type="checkbox" id="slIncludeDepleted" checked> Depleted items</label>
+      <label class="soon-toggle"><input type="checkbox" id="slIncludeReorder" checked> At or below reorder threshold</label>
+      <label class="soon-toggle"><input type="checkbox" id="slIncludeSoon"> Expiring soon</label>
+    </div>
+    <button type="button" id="slGenerateBtn" class="btn-primary">Generate list</button>
+
+    <div id="shoppingListResultsSection" hidden>
+      <ul id="shoppingListResults" class="category-manage-list"></ul>
+      <div class="sheet-actions">
+        <button type="button" id="slCopyBtn" class="btn-secondary">Copy</button>
+        <button type="button" id="slShareBtn" class="btn-secondary">Share</button>
+      </div>
+    </div>
+
+    <button id="shoppingListCloseBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
 <!-- Settings sheet -->
 <div id="settingsSheet" class="sheet-backdrop" hidden>
   <div class="sheet">
@@ -298,6 +323,7 @@
     <p class="settings-desc">Everything is stored only on this device. Back up your list before reinstalling or switching devices.</p>
     <div class="settings-actions">
       <button id="manageCategoriesBtn" class="btn-secondary">Manage categories</button>
+      <button id="generateShoppingListBtn" class="btn-secondary">Generate shopping list</button>
       <button id="startAuditBtn" class="btn-secondary">Location check</button>
       <button id="adjustThresholdsBtn" class="btn-secondary">Adjust thresholds</button>
       <button id="statsBtn" class="btn-secondary">View stats</button>
