@@ -18,6 +18,10 @@
     soonOnly: false,
     depletedOnly: false,
     editingId: null,
+    viewingId: null,
+    withdrawItemId: null,
+    batchEditContext: "form",
+    batchEditItemId: null,
     formCategoryId: null,
     formSubCategoryId: null,
     formBatches: [],
@@ -229,6 +233,14 @@
     return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
   }
 
+  function formatDateShort(dateStr) {
+    var d = new Date(dateStr + "T00:00:00");
+    var day = String(d.getDate()).padStart(2, "0");
+    var month = String(d.getMonth() + 1).padStart(2, "0");
+    var year = String(d.getFullYear()).slice(-2);
+    return day + "-" + month + "-" + year;
+  }
+
   function addDays(dateStr, days) {
     var d = new Date(dateStr + "T00:00:00");
     d.setDate(d.getDate() + Number(days));
@@ -249,7 +261,7 @@
     return candidates[0];
   }
 
-  function expiryStatus(dateStr, type) {
+  function expiryStatus(dateStr, type, compact) {
     var d = daysUntil(dateStr);
     if (d === null) return { label: "No expiry", cls: "" };
 
@@ -260,10 +272,10 @@
     if (d < 0) label = "Expired " + Math.abs(d) + "d ago";
     else if (d === 0) label = "Expires today";
     else if (d <= soonDays) label = "In " + d + "d";
-    else label = formatDate(dateStr);
+    else label = compact ? formatDateShort(dateStr) : formatDate(dateStr);
 
     var isBestBefore = type === "best_before";
-    if (isBestBefore) label += " · Best before";
+    if (isBestBefore && !compact) label += " · Best before";
 
     var cls;
     if (isBestBefore) {
@@ -284,8 +296,7 @@
       var eff = getBatchEffectiveDate(item, b);
       if (!eff) return;
       var s = expiryStatus(eff.date, eff.type);
-      if (eff.source === "opened") s.label += " (from open date)";
-      if (!worst || STATUS_RANK[s.cls] > STATUS_RANK[worst.status.cls]) worst = { batch: b, status: s, effDate: eff.date };
+      if (!worst || STATUS_RANK[s.cls] > STATUS_RANK[worst.status.cls]) worst = { batch: b, eff: eff, status: s };
     });
     return worst;
   }
@@ -361,8 +372,8 @@
       })
       .sort(function (a, b) {
         var wa = worstBatchStatus(a), wb = worstBatchStatus(b);
-        var da = wa ? daysUntil(wa.effDate) : null;
-        var db = wb ? daysUntil(wb.effDate) : null;
+        var da = wa ? daysUntil(wa.eff.date) : null;
+        var db = wb ? daysUntil(wb.eff.date) : null;
         if (da === null && db === null) return a.name.localeCompare(b.name);
         if (da === null) return 1;
         if (db === null) return -1;
@@ -433,13 +444,16 @@
       var locs = batchLocations(item);
       if (locs.length) subParts.push(locs.join(", "));
 
-      var expiryLabel, expiryCls;
+      var qtyText, expiryLabel, expiryCls;
       if (total === 0) {
-        expiryLabel = "Depleted"; expiryCls = "expiry-urgent";
+        qtyText = ""; expiryLabel = "Depleted"; expiryCls = "expiry-urgent";
       } else if (worst) {
-        expiryLabel = worst.status.label + " (" + formatQty(worst.batch.quantity) + (item.unit ? " " + item.unit : "") + ")";
-        expiryCls = worst.status.cls;
+        var compact = expiryStatus(worst.eff.date, worst.eff.type, true);
+        qtyText = "";
+        expiryLabel = compact.label + " (" + formatQty(worst.batch.quantity) + (item.unit ? " " + item.unit : "") + ")";
+        expiryCls = compact.cls;
       } else {
+        qtyText = formatQty(total) + (item.unit ? " " + item.unit : "");
         expiryLabel = ""; expiryCls = "";
       }
 
@@ -457,10 +471,10 @@
       li.querySelector(".item-name").textContent = item.name;
       li.querySelector(".item-category").textContent = categoryName(item.categoryId);
       li.querySelector(".item-sub").textContent = subParts.join(" · ");
-      li.querySelector(".item-qty").textContent = formatQty(total) + (item.unit ? " " + item.unit : "");
+      li.querySelector(".item-qty").textContent = qtyText;
       li.querySelector(".item-expiry").textContent = expiryLabel;
 
-      li.addEventListener("click", function () { openForm(item.id); });
+      li.addEventListener("click", function () { openView(item.id); });
       listEl.appendChild(li);
     });
   }
@@ -483,6 +497,84 @@
   document.getElementById("soonToggle").addEventListener("change", function (e) { state.soonOnly = e.target.checked; render(); });
   document.getElementById("depletedToggle").addEventListener("change", function (e) { state.depletedOnly = e.target.checked; render(); });
   document.getElementById("searchInput").addEventListener("input", function (e) { state.search = e.target.value.trim(); render(); });
+
+  // ---------- item view sheet ----------
+
+  var itemViewSheet = document.getElementById("itemViewSheet");
+  var viewBatchList = document.getElementById("viewBatchList");
+
+  function renderViewBatches(item) {
+    if (item.batches.length === 0) {
+      viewBatchList.innerHTML = '<li class="batch-empty">No batches — depleted, due for restock.</li>';
+      return;
+    }
+    var sorted = sortBatchesByEffectiveDate(item, item.batches);
+    viewBatchList.innerHTML = sorted.map(function (b) {
+      var eff = getBatchEffectiveDate(item, b);
+      var status = eff ? expiryStatus(eff.date, eff.type) : { label: "No expiry", cls: "" };
+      if (eff && eff.source === "opened") status.label += " (from open date)";
+      var qtyText = formatQty(b.quantity) + (item.unit ? " " + item.unit : "");
+      var locText = b.location ? " · " + escapeHtml(b.location) : "";
+      return '<li class="batch-row" data-id="' + b.id + '">' +
+        '<span class="batch-qty">' + qtyText + '</span>' +
+        '<span class="batch-expiry ' + status.cls + '">' + status.label + locText + '</span>' +
+        '<button type="button" class="icon-btn" title="Edit this batch">✎</button>' +
+      '</li>';
+    }).join("");
+  }
+
+  viewBatchList.addEventListener("click", function (e) {
+    var row = e.target.closest(".batch-row[data-id]");
+    if (!row) return;
+    openBatchSheet(row.dataset.id, "direct", state.viewingId);
+  });
+
+  function openView(id) {
+    var item = state.items.find(function (it) { return it.id === id; });
+    if (!item) return;
+    state.viewingId = id;
+
+    document.getElementById("viewItemName").textContent = item.name;
+
+    var metaParts = [categoryName(item.categoryId)];
+    var sub = getSubcategory(item.categoryId, item.subcategoryId);
+    if (sub) metaParts.push(sub.name);
+    if (item.unit) metaParts.push(item.unit);
+    if (item.reorderThreshold !== null) metaParts.push("Reorder at " + formatQty(item.reorderThreshold));
+    if (item.openShelfLifeDays !== null) metaParts.push("Once opened: " + item.openShelfLifeDays + "d");
+    if (item.barcode) metaParts.push("Barcode " + item.barcode);
+    document.getElementById("viewItemMeta").textContent = metaParts.join(" · ");
+
+    renderViewBatches(item);
+
+    var notesEl = document.getElementById("viewNotesLine");
+    if (item.notes) { notesEl.hidden = false; notesEl.textContent = item.notes; }
+    else notesEl.hidden = true;
+
+    itemViewSheet.hidden = false;
+  }
+
+  document.getElementById("viewCloseBtn").addEventListener("click", function () { itemViewSheet.hidden = true; });
+  itemViewSheet.addEventListener("click", function (e) { if (e.target === itemViewSheet) itemViewSheet.hidden = true; });
+
+  document.getElementById("viewEditBtn").addEventListener("click", function () {
+    itemViewSheet.hidden = true;
+    openForm(state.viewingId);
+  });
+
+  document.getElementById("viewDeleteBtn").addEventListener("click", function () {
+    if (!state.viewingId) return;
+    if (!confirm("Delete this item? This can't be undone.")) return;
+    state.items = state.items.filter(function (it) { return it.id !== state.viewingId; });
+    saveItems();
+    itemViewSheet.hidden = true;
+    render();
+  });
+
+  document.getElementById("viewWithdrawBtn").addEventListener("click", function () {
+    itemViewSheet.hidden = true;
+    openWithdrawFor(state.viewingId);
+  });
 
   // ---------- add/edit sheet ----------
 
@@ -565,7 +657,7 @@
 
   document.getElementById("formBatchList").addEventListener("click", function (e) {
     var editBtn = e.target.closest(".batch-edit");
-    if (editBtn) { openBatchSheet(editBtn.dataset.id); return; }
+    if (editBtn) { openBatchSheet(editBtn.dataset.id, "form"); return; }
     var delBtn = e.target.closest(".batch-delete");
     if (delBtn) {
       if (!confirm("Remove this batch?")) return;
@@ -585,9 +677,18 @@
     }).join("");
   }
 
-  function openBatchSheet(batchId) {
+  function openBatchSheet(batchId, context, itemId) {
+    state.batchEditContext = context || "form";
+    state.batchEditItemId = itemId || null;
     state.editingBatchId = batchId || null;
-    var batch = batchId ? state.formBatches.find(function (b) { return b.id === batchId; }) : null;
+
+    var batch;
+    if (state.batchEditContext === "direct") {
+      var directItem = state.items.find(function (it) { return it.id === itemId; });
+      batch = directItem && batchId ? directItem.batches.find(function (b) { return b.id === batchId; }) : null;
+    } else {
+      batch = batchId ? state.formBatches.find(function (b) { return b.id === batchId; }) : null;
+    }
 
     document.getElementById("batchSheetTitle").textContent = batch ? "Edit batch" : "Add batch";
     batchQtyInput.value = batch ? formatQty(batch.quantity) : "1";
@@ -609,9 +710,11 @@
     batchSheet.hidden = true;
     batchForm.reset();
     state.editingBatchId = null;
+    state.batchEditContext = "form";
+    state.batchEditItemId = null;
   }
 
-  document.getElementById("addBatchBtn").addEventListener("click", function () { openBatchSheet(null); });
+  document.getElementById("addBatchBtn").addEventListener("click", function () { openBatchSheet(null, "form"); });
   document.getElementById("batchCancelBtn").addEventListener("click", closeBatchSheet);
   batchSheet.addEventListener("click", function (e) { if (e.target === batchSheet) closeBatchSheet(); });
 
@@ -630,14 +733,26 @@
     var openDate = document.getElementById("batchOpenDate").value || null;
     var location = document.getElementById("batchLocation").value.trim() || null;
 
-    if (state.editingBatchId) {
-      var b = state.formBatches.find(function (x) { return x.id === state.editingBatchId; });
-      if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; b.openDate = openDate; b.location = location; }
+    if (state.batchEditContext === "direct") {
+      var item = state.items.find(function (it) { return it.id === state.batchEditItemId; });
+      if (item) {
+        var db = item.batches.find(function (x) { return x.id === state.editingBatchId; });
+        if (db) { db.quantity = qty; db.expiry = expiry; db.expiryType = type; db.openDate = openDate; db.location = location; }
+        item.updatedAt = new Date().toISOString();
+        saveItems();
+        renderViewBatches(item);
+        render();
+      }
     } else {
-      state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, location: location });
+      if (state.editingBatchId) {
+        var b = state.formBatches.find(function (x) { return x.id === state.editingBatchId; });
+        if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; b.openDate = openDate; b.location = location; }
+      } else {
+        state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, location: location });
+      }
+      renderFormBatches();
     }
     closeBatchSheet();
-    renderFormBatches();
   });
 
   // ---------- item form open/close/submit ----------
@@ -731,9 +846,10 @@
   var withdrawForm = document.getElementById("withdrawForm");
   var withdrawQtyInput = document.getElementById("withdrawQty");
 
-  withdrawBtn.addEventListener("click", function () {
-    var item = state.items.find(function (it) { return it.id === state.editingId; });
+  function openWithdrawFor(itemId) {
+    var item = state.items.find(function (it) { return it.id === itemId; });
     if (!item) return;
+    state.withdrawItemId = itemId;
     var total = itemTotalQty(item);
     document.getElementById("withdrawItemName").textContent = item.name;
     document.getElementById("withdrawStockLine").textContent =
@@ -743,15 +859,17 @@
     withdrawQtyInput.value = Math.min(1, total) || 1;
     document.getElementById("withdrawReason").value = "";
     withdrawSheet.hidden = false;
-  });
+  }
 
-  function closeWithdrawSheet() { withdrawSheet.hidden = true; withdrawForm.reset(); }
+  withdrawBtn.addEventListener("click", function () { openWithdrawFor(state.editingId); });
+
+  function closeWithdrawSheet() { withdrawSheet.hidden = true; withdrawForm.reset(); state.withdrawItemId = null; }
   document.getElementById("withdrawCancelBtn").addEventListener("click", closeWithdrawSheet);
   withdrawSheet.addEventListener("click", function (e) { if (e.target === withdrawSheet) closeWithdrawSheet(); });
 
   withdrawForm.addEventListener("submit", function (e) {
     e.preventDefault();
-    var item = state.items.find(function (it) { return it.id === state.editingId; });
+    var item = state.items.find(function (it) { return it.id === state.withdrawItemId; });
     if (!item) return;
 
     var total = itemTotalQty(item);
@@ -780,7 +898,11 @@
     saveItems();
 
     closeWithdrawSheet();
-    closeForm();
+    itemSheet.hidden = true;
+    itemForm.reset();
+    state.editingId = null;
+    state.formBatches = [];
+    itemViewSheet.hidden = true;
     render();
   });
 
@@ -1204,7 +1326,20 @@
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("sw.js").catch(function (err) { console.warn("Service worker registration failed", err); });
+      navigator.serviceWorker.register("sw.js").then(function (reg) {
+        // Every time the app opens, explicitly ask the browser to check the
+        // network for a newer sw.js, rather than waiting for it to notice on its own.
+        reg.update();
+      }).catch(function (err) { console.warn("Service worker registration failed", err); });
+
+      // If a new service worker takes control (because a newer version was found
+      // and activated), reload once so the fresh files are actually used.
+      var reloaded = false;
+      navigator.serviceWorker.addEventListener("controllerchange", function () {
+        if (reloaded) return;
+        reloaded = true;
+        window.location.reload();
+      });
     });
   }
 

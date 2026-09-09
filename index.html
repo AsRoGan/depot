@@ -39,6 +39,23 @@
 
 <button id="fab" class="fab" aria-label="Add item" title="Add item">+</button>
 
+<!-- Item view sheet (opened first on tap; no auto-focus, no keyboard pop-up) -->
+<div id="itemViewSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2 id="viewItemName"></h2>
+    <p class="settings-desc" id="viewItemMeta"></p>
+    <ul id="viewBatchList" class="batch-list"></ul>
+    <p class="settings-desc" id="viewNotesLine" hidden></p>
+    <div class="sheet-actions">
+      <button type="button" id="viewDeleteBtn" class="btn-danger">Delete</button>
+      <button type="button" id="viewWithdrawBtn" class="btn-secondary">Withdraw</button>
+      <button type="button" id="viewCloseBtn" class="btn-ghost">Close</button>
+      <button type="button" id="viewEditBtn" class="btn-primary">Edit</button>
+    </div>
+  </div>
+</div>
+
 <!-- Item add/edit sheet -->
 <div id="itemSheet" class="sheet-backdrop" hidden>
   <form id="itemForm" class="sheet">
