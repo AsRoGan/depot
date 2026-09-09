@@ -1,10 +1,10 @@
 (function () {
   "use strict";
 
-  var STORAGE_KEY = "depot.items.v1";
-  var HISTORY_KEY = "depot.history.v1";
-  var CATEGORIES_KEY = "depot.categories.v1";
-  var SETTINGS_KEY = "depot.settings.v1";
+  var LS_ITEMS_KEY = "depot.items.v1";
+  var LS_HISTORY_KEY = "depot.history.v1";
+  var LS_CATEGORIES_KEY = "depot.categories.v1";
+  var LS_SETTINGS_KEY = "depot.settings.v1";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
 
   var state = {
@@ -29,65 +29,119 @@
     pendingImport: null
   };
 
-  // ---------- persistence ----------
-
-  function loadItems() {
-    try {
-      var raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch (e) {
-      console.error("Could not read stored items", e);
-      return [];
-    }
+  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+  function roundQty(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+  function formatQty(n) { return String(parseFloat(roundQty(n).toFixed(2))); }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
   }
-  function saveItems() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.items)); }
 
-  function loadHistory() {
-    try {
-      var raw = localStorage.getItem(HISTORY_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch (e) {
-      console.error("Could not read withdrawal history", e);
-      return [];
-    }
-  }
-  function saveHistory() { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); }
-
-  function loadCategories() {
-    try {
-      var raw = localStorage.getItem(CATEGORIES_KEY);
-      if (raw) return JSON.parse(raw);
-    } catch (e) {
-      console.error("Could not read categories", e);
-    }
-    var defaults = [
+  function defaultCategories() {
+    return [
       { id: "food", name: "Food", color: "#6B8F47", subcategories: [] },
       { id: "medical", name: "Medical", color: "#B23A48", subcategories: [] },
       { id: "devices", name: "Devices", color: "#3E6C8C", subcategories: [] },
       { id: "other", name: "Other", color: "#8A6E4B", subcategories: [] }
     ];
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(defaults));
-    return defaults;
   }
-  function saveCategories() { localStorage.setItem(CATEGORIES_KEY, JSON.stringify(state.categories)); }
 
-  function loadSettings() {
-    try {
-      var raw = localStorage.getItem(SETTINGS_KEY);
-      if (raw) {
-        var parsed = JSON.parse(raw);
-        return {
-          soonDays: Number(parsed.soonDays) || 30,
-          urgentDays: parsed.urgentDays !== undefined ? Number(parsed.urgentDays) : 7,
-          depletionThreshold: parsed.depletionThreshold !== undefined ? Number(parsed.depletionThreshold) : 0
-        };
-      }
-    } catch (e) {
-      console.error("Could not read settings", e);
-    }
-    return { soonDays: 30, urgentDays: 7, depletionThreshold: 0 };
+  // ---------- IndexedDB layer ----------
+
+  var DB_NAME = "depot-db";
+  var DB_VERSION = 1;
+  var dbPromise = null;
+
+  function openDB() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise(function (resolve, reject) {
+      var req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = function (e) {
+        var db = e.target.result;
+        ["items", "history", "categories"].forEach(function (name) {
+          if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: "id" });
+        });
+        if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv", { keyPath: "key" });
+      };
+      req.onsuccess = function (e) { resolve(e.target.result); };
+      req.onerror = function (e) { reject(e.target.error); };
+    });
+    return dbPromise;
   }
-  function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings)); }
+
+  function idbGetAll(store) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var req = db.transaction(store, "readonly").objectStore(store).getAll();
+        req.onsuccess = function () { resolve(req.result || []); };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+
+  function idbClearAndPutAll(store, records) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(store, "readwrite");
+        var os = tx.objectStore(store);
+        os.clear();
+        (records || []).forEach(function (r) { os.put(r); });
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function idbGetKV(key, fallback) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var req = db.transaction("kv", "readonly").objectStore("kv").get(key);
+        req.onsuccess = function () { resolve(req.result ? req.result.value : fallback); };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+
+  function idbSetKV(key, value) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction("kv", "readwrite");
+        tx.objectStore("kv").put({ key: key, value: value });
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function saveItems() { idbClearAndPutAll("items", state.items).catch(function (e) { console.error("Save items failed", e); }); }
+  function saveHistory() { idbClearAndPutAll("history", state.history).catch(function (e) { console.error("Save history failed", e); }); }
+  function saveCategories() { idbClearAndPutAll("categories", state.categories).catch(function (e) { console.error("Save categories failed", e); }); }
+  function saveSettings() { idbSetKV("settings", state.settings).catch(function (e) { console.error("Save settings failed", e); }); }
+
+  function migrateFromLocalStorage() {
+    return idbGetAll("items").then(function (existing) {
+      if (existing.length > 0) return;
+      var oldRaw = localStorage.getItem(LS_ITEMS_KEY);
+      if (!oldRaw) return;
+      var oldItems, oldHistory, oldCategories, oldSettings;
+      try {
+        oldItems = JSON.parse(oldRaw) || [];
+        oldHistory = JSON.parse(localStorage.getItem(LS_HISTORY_KEY) || "[]");
+        oldCategories = JSON.parse(localStorage.getItem(LS_CATEGORIES_KEY) || "null");
+        oldSettings = JSON.parse(localStorage.getItem(LS_SETTINGS_KEY) || "null");
+      } catch (e) {
+        console.error("Could not parse existing localStorage data during migration", e);
+        return;
+      }
+      var jobs = [idbClearAndPutAll("items", oldItems), idbClearAndPutAll("history", oldHistory)];
+      if (oldCategories) jobs.push(idbClearAndPutAll("categories", oldCategories));
+      if (oldSettings) jobs.push(idbSetKV("settings", oldSettings));
+      return Promise.all(jobs);
+    });
+  }
+
+  // ---------- schema migration (field-level) ----------
 
   function migrateItems(items) {
     var changed = false;
@@ -101,13 +155,30 @@
           id: uid(),
           quantity: Number(it.quantity) || 0,
           expiry: it.expiry || null,
-          expiryType: it.expiry ? (it.expiryType || "use_by") : null
+          expiryType: it.expiry ? (it.expiryType || "use_by") : null,
+          location: it.location || null,
+          openDate: null
         }];
-        delete it.quantity;
-        delete it.expiry;
-        delete it.expiryType;
+        delete it.quantity; delete it.expiry; delete it.expiryType;
         changed = true;
       }
+
+      if (it.location !== undefined) {
+        it.batches.forEach(function (b) {
+          if (b.location === undefined || b.location === null) b.location = it.location || null;
+        });
+        delete it.location;
+        changed = true;
+      }
+
+      it.batches.forEach(function (b) {
+        if (b.location === undefined) { b.location = null; changed = true; }
+        if (b.openDate === undefined) { b.openDate = null; changed = true; }
+      });
+
+      if (it.reorderThreshold === undefined) { it.reorderThreshold = null; changed = true; }
+      if (it.openShelfLifeDays === undefined) { it.openShelfLifeDays = null; changed = true; }
+      if (it.barcode === undefined) { it.barcode = null; changed = true; }
     });
     return changed;
   }
@@ -122,36 +193,9 @@
     return changed;
   }
 
-  state.items = loadItems();
-  if (migrateItems(state.items)) saveItems();
-  state.history = loadHistory();
-  if (migrateHistory(state.history)) saveHistory();
-  state.categories = loadCategories();
-  state.settings = loadSettings();
-
-  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
-
-  function roundQty(n) { return Math.round((Number(n) || 0) * 100) / 100; }
-  function formatQty(n) { return String(parseFloat(roundQty(n).toFixed(2))); }
-
-  function mergeById(existing, incoming) {
-    var existingIds = {};
-    existing.forEach(function (x) { existingIds[x.id] = true; });
-    var added = incoming.filter(function (x) { return !existingIds[x.id]; });
-    return existing.concat(added);
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
   // ---------- category helpers ----------
 
-  function getCategory(id) {
-    return state.categories.find(function (c) { return c.id === id; }) || null;
-  }
+  function getCategory(id) { return state.categories.find(function (c) { return c.id === id; }) || null; }
   function getSubcategory(catId, subId) {
     var cat = getCategory(catId);
     if (!cat) return null;
@@ -172,14 +216,6 @@
     return roundQty(item.batches.reduce(function (sum, b) { return sum + (Number(b.quantity) || 0); }, 0));
   }
 
-  function sortByExpiryAscNullsLast(a, b) {
-    var da = daysUntil(a.expiry), db = daysUntil(b.expiry);
-    if (da === null && db === null) return 0;
-    if (da === null) return 1;
-    if (db === null) return -1;
-    return da - db;
-  }
-
   function daysUntil(dateStr) {
     if (!dateStr) return null;
     var today = new Date();
@@ -191,6 +227,26 @@
   function formatDate(dateStr) {
     var d = new Date(dateStr + "T00:00:00");
     return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  }
+
+  function addDays(dateStr, days) {
+    var d = new Date(dateStr + "T00:00:00");
+    d.setDate(d.getDate() + Number(days));
+    var y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + day;
+  }
+
+  // Resolves the date that actually governs a batch: the printed expiry, or the
+  // "opened N days ago + shelf life" countdown, whichever comes first.
+  function getBatchEffectiveDate(item, batch) {
+    var candidates = [];
+    if (batch.expiry) candidates.push({ date: batch.expiry, type: batch.expiryType || "use_by", source: "printed" });
+    if (batch.openDate && item.openShelfLifeDays) {
+      candidates.push({ date: addDays(batch.openDate, item.openShelfLifeDays), type: "use_by", source: "opened" });
+    }
+    if (!candidates.length) return null;
+    candidates.sort(function (a, b) { return daysUntil(a.date) - daysUntil(b.date); });
+    return candidates[0];
   }
 
   function expiryStatus(dateStr, type) {
@@ -223,25 +279,57 @@
   var STATUS_RANK = { "expiry-urgent": 3, "expiry-soon": 2, "expiry-fine": 1, "": 0 };
 
   function worstBatchStatus(item) {
-    var withDates = item.batches.filter(function (b) { return b.expiry; });
-    if (withDates.length === 0) return null;
     var worst = null;
-    withDates.forEach(function (b) {
-      var s = expiryStatus(b.expiry, b.expiryType);
-      if (!worst || STATUS_RANK[s.cls] > STATUS_RANK[worst.status.cls]) worst = { batch: b, status: s };
+    item.batches.forEach(function (b) {
+      var eff = getBatchEffectiveDate(item, b);
+      if (!eff) return;
+      var s = expiryStatus(eff.date, eff.type);
+      if (eff.source === "opened") s.label += " (from open date)";
+      if (!worst || STATUS_RANK[s.cls] > STATUS_RANK[worst.status.cls]) worst = { batch: b, status: s, effDate: eff.date };
     });
     return worst;
   }
 
+  function sortBatchesByEffectiveDate(item, batches) {
+    return batches.slice().sort(function (a, b) {
+      var ea = getBatchEffectiveDate(item, a), eb = getBatchEffectiveDate(item, b);
+      var da = ea ? daysUntil(ea.date) : null, db = eb ? daysUntil(eb.date) : null;
+      if (da === null && db === null) return 0;
+      if (da === null) return 1;
+      if (db === null) return -1;
+      return da - db;
+    });
+  }
+
   function isSoon(item) {
     return item.batches.some(function (b) {
-      var d = daysUntil(b.expiry);
-      return d !== null && d <= state.settings.soonDays;
+      var eff = getBatchEffectiveDate(item, b);
+      return eff && daysUntil(eff.date) <= state.settings.soonDays;
     });
   }
 
   function isDepleted(item) {
     return itemTotalQty(item) <= state.settings.depletionThreshold;
+  }
+
+  function batchLocations(item) {
+    var seen = {};
+    var out = [];
+    item.batches.forEach(function (b) {
+      if (b.location && !seen[b.location]) { seen[b.location] = true; out.push(b.location); }
+    });
+    return out;
+  }
+
+  function allKnownLocations() {
+    var seen = {};
+    var out = [];
+    state.items.forEach(function (it) {
+      it.batches.forEach(function (b) {
+        if (b.location && !seen[b.location]) { seen[b.location] = true; out.push(b.location); }
+      });
+    });
+    return out.sort();
   }
 
   // ---------- main list rendering ----------
@@ -266,15 +354,15 @@
         if (state.depletedOnly && !isDepleted(it)) return false;
         if (state.search) {
           var q = state.search.toLowerCase();
-          var hay = (it.name + " " + (it.location || "") + " " + (it.notes || "")).toLowerCase();
+          var hay = (it.name + " " + batchLocations(it).join(" ") + " " + (it.notes || "") + " " + (it.barcode || "")).toLowerCase();
           if (hay.indexOf(q) === -1) return false;
         }
         return true;
       })
       .sort(function (a, b) {
         var wa = worstBatchStatus(a), wb = worstBatchStatus(b);
-        var da = wa ? daysUntil(wa.batch.expiry) : null;
-        var db = wb ? daysUntil(wb.batch.expiry) : null;
+        var da = wa ? daysUntil(wa.effDate) : null;
+        var db = wb ? daysUntil(wb.effDate) : null;
         if (da === null && db === null) return a.name.localeCompare(b.name);
         if (da === null) return 1;
         if (db === null) return -1;
@@ -339,35 +427,35 @@
       var total = itemTotalQty(item);
       var worst = worstBatchStatus(item);
 
-      var subParts = [categoryName(item.categoryId)];
       var subName = getSubcategory(item.categoryId, item.subcategoryId);
+      var subParts = [];
       if (subName) subParts.push(subName.name);
-      if (item.location) subParts.push(item.location);
+      var locs = batchLocations(item);
+      if (locs.length) subParts.push(locs.join(", "));
 
       var expiryLabel, expiryCls;
       if (total === 0) {
-        expiryLabel = "Depleted";
-        expiryCls = "expiry-urgent";
+        expiryLabel = "Depleted"; expiryCls = "expiry-urgent";
       } else if (worst) {
         expiryLabel = worst.status.label + " (" + formatQty(worst.batch.quantity) + (item.unit ? " " + item.unit : "") + ")";
         expiryCls = worst.status.cls;
       } else {
-        expiryLabel = "";
-        expiryCls = "";
+        expiryLabel = ""; expiryCls = "";
       }
 
       li.innerHTML =
-        '<span class="dot item-cat-dot" style="background:' + colorFor(item.categoryId) + '"></span>' +
-        '<div class="item-main">' +
+        '<div class="item-row-top">' +
+          '<span class="dot item-cat-dot" style="background:' + colorFor(item.categoryId) + '"></span>' +
           '<p class="item-name"></p>' +
-          '<p class="item-sub"></p>' +
+          '<span class="item-category"></span>' +
         '</div>' +
-        '<div class="item-meta">' +
-          '<span class="item-qty"></span>' +
-          '<span class="item-expiry ' + expiryCls + '"></span>' +
+        '<div class="item-row-bottom">' +
+          '<p class="item-sub"></p>' +
+          '<div class="item-meta"><span class="item-qty"></span><span class="item-expiry ' + expiryCls + '"></span></div>' +
         '</div>';
 
       li.querySelector(".item-name").textContent = item.name;
+      li.querySelector(".item-category").textContent = categoryName(item.categoryId);
       li.querySelector(".item-sub").textContent = subParts.join(" · ");
       li.querySelector(".item-qty").textContent = formatQty(total) + (item.unit ? " " + item.unit : "");
       li.querySelector(".item-expiry").textContent = expiryLabel;
@@ -392,20 +480,9 @@
     render();
   });
 
-  document.getElementById("soonToggle").addEventListener("change", function (e) {
-    state.soonOnly = e.target.checked;
-    render();
-  });
-
-  document.getElementById("depletedToggle").addEventListener("change", function (e) {
-    state.depletedOnly = e.target.checked;
-    render();
-  });
-
-  document.getElementById("searchInput").addEventListener("input", function (e) {
-    state.search = e.target.value.trim();
-    render();
-  });
+  document.getElementById("soonToggle").addEventListener("change", function (e) { state.soonOnly = e.target.checked; render(); });
+  document.getElementById("depletedToggle").addEventListener("change", function (e) { state.depletedOnly = e.target.checked; render(); });
+  document.getElementById("searchInput").addEventListener("input", function (e) { state.search = e.target.value.trim(); render(); });
 
   // ---------- add/edit sheet ----------
 
@@ -429,11 +506,7 @@
     var label = document.getElementById("formSubCategoryLabel");
     var container = document.getElementById("formSubCategoryChips");
     var cat = getCategory(state.formCategoryId);
-    if (!cat || cat.subcategories.length === 0) {
-      label.hidden = true;
-      container.innerHTML = "";
-      return;
-    }
+    if (!cat || cat.subcategories.length === 0) { label.hidden = true; container.innerHTML = ""; return; }
     label.hidden = false;
     var html = '<button type="button" class="chip' + (!state.formSubCategoryId ? " is-active" : "") + '" data-sub="">None</button>';
     cat.subcategories.forEach(function (sub) {
@@ -443,26 +516,27 @@
   }
 
   document.getElementById("formCategoryChips").addEventListener("click", function (e) {
-    var btn = e.target.closest(".chip");
-    if (!btn) return;
+    var btn = e.target.closest(".chip"); if (!btn) return;
     state.formCategoryId = btn.dataset.category;
     state.formSubCategoryId = null;
-    renderFormCategoryChips();
-    renderFormSubCategoryChips();
+    renderFormCategoryChips(); renderFormSubCategoryChips();
   });
-
   document.getElementById("formSubCategoryChips").addEventListener("click", function (e) {
-    var btn = e.target.closest(".chip");
-    if (!btn) return;
+    var btn = e.target.closest(".chip"); if (!btn) return;
     state.formSubCategoryId = btn.dataset.sub || null;
     renderFormSubCategoryChips();
   });
 
   // ---------- batches within the item form ----------
 
+  function currentFormPseudoItem() {
+    return { openShelfLifeDays: Number(document.getElementById("fieldOpenShelfLife").value) || null };
+  }
+
   function renderFormBatches() {
     var container = document.getElementById("formBatchList");
     var unit = document.getElementById("fieldUnit").value.trim();
+    var pseudoItem = currentFormPseudoItem();
     var total = roundQty(state.formBatches.reduce(function (sum, b) { return sum + (Number(b.quantity) || 0); }, 0));
     document.getElementById("formBatchesTotal").textContent = "Total: " + formatQty(total) + (unit ? " " + unit : "");
 
@@ -470,13 +544,16 @@
       container.innerHTML = '<li class="batch-empty">No batches yet — add one below, or leave empty to track this as depleted and due for restock.</li>';
       return;
     }
-    var sorted = state.formBatches.slice().sort(sortByExpiryAscNullsLast);
+    var sorted = sortBatchesByEffectiveDate(pseudoItem, state.formBatches);
     container.innerHTML = sorted.map(function (b) {
-      var status = expiryStatus(b.expiry, b.expiryType);
+      var eff = getBatchEffectiveDate(pseudoItem, b);
+      var status = eff ? expiryStatus(eff.date, eff.type) : { label: "No expiry", cls: "" };
+      if (eff && eff.source === "opened") status.label += " (from open date)";
       var qtyText = formatQty(b.quantity) + (unit ? " " + unit : "");
+      var locText = b.location ? " · " + escapeHtml(b.location) : "";
       return '<li class="batch-row" data-id="' + b.id + '">' +
         '<span class="batch-qty">' + qtyText + '</span>' +
-        '<span class="batch-expiry ' + status.cls + '">' + status.label + '</span>' +
+        '<span class="batch-expiry ' + status.cls + '">' + status.label + locText + '</span>' +
         '<button type="button" class="icon-btn batch-edit" data-id="' + b.id + '" title="Edit">✎</button>' +
         '<button type="button" class="icon-btn batch-delete" data-id="' + b.id + '" title="Remove">🗑</button>' +
       '</li>';
@@ -484,6 +561,7 @@
   }
 
   document.getElementById("fieldUnit").addEventListener("input", renderFormBatches);
+  document.getElementById("fieldOpenShelfLife").addEventListener("input", renderFormBatches);
 
   document.getElementById("formBatchList").addEventListener("click", function (e) {
     var editBtn = e.target.closest(".batch-edit");
@@ -500,6 +578,13 @@
   var batchForm = document.getElementById("batchForm");
   var batchQtyInput = document.getElementById("batchQty");
 
+  function renderLocationSuggestions() {
+    var dl = document.getElementById("locationSuggestions");
+    dl.innerHTML = allKnownLocations().map(function (loc) {
+      return '<option value="' + escapeHtml(loc) + '"></option>';
+    }).join("");
+  }
+
   function openBatchSheet(batchId) {
     state.editingBatchId = batchId || null;
     var batch = batchId ? state.formBatches.find(function (b) { return b.id === batchId; }) : null;
@@ -507,6 +592,9 @@
     document.getElementById("batchSheetTitle").textContent = batch ? "Edit batch" : "Add batch";
     batchQtyInput.value = batch ? formatQty(batch.quantity) : "1";
     document.getElementById("batchExpiry").value = batch ? (batch.expiry || "") : "";
+    document.getElementById("batchOpenDate").value = batch ? (batch.openDate || "") : "";
+    document.getElementById("batchLocation").value = batch ? (batch.location || "") : "";
+    renderLocationSuggestions();
 
     var type = batch && batch.expiryType ? batch.expiryType : "use_by";
     document.querySelectorAll("#batchExpiryTypeSegmented .segment").forEach(function (s) {
@@ -528,11 +616,8 @@
   batchSheet.addEventListener("click", function (e) { if (e.target === batchSheet) closeBatchSheet(); });
 
   document.getElementById("batchExpiryTypeSegmented").addEventListener("click", function (e) {
-    var btn = e.target.closest(".segment");
-    if (!btn) return;
-    document.querySelectorAll("#batchExpiryTypeSegmented .segment").forEach(function (s) {
-      s.classList.toggle("is-active", s === btn);
-    });
+    var btn = e.target.closest(".segment"); if (!btn) return;
+    document.querySelectorAll("#batchExpiryTypeSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
   });
 
   batchForm.addEventListener("submit", function (e) {
@@ -542,12 +627,14 @@
     var expiry = document.getElementById("batchExpiry").value || null;
     var activeSeg = document.querySelector("#batchExpiryTypeSegmented .segment.is-active");
     var type = expiry ? (activeSeg ? activeSeg.dataset.type : "use_by") : null;
+    var openDate = document.getElementById("batchOpenDate").value || null;
+    var location = document.getElementById("batchLocation").value.trim() || null;
 
     if (state.editingBatchId) {
       var b = state.formBatches.find(function (x) { return x.id === state.editingBatchId; });
-      if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; }
+      if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; b.openDate = openDate; b.location = location; }
     } else {
-      state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type });
+      state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, location: location });
     }
     closeBatchSheet();
     renderFormBatches();
@@ -565,7 +652,9 @@
 
     document.getElementById("fieldName").value = item ? item.name : "";
     document.getElementById("fieldUnit").value = item ? (item.unit || "") : "";
-    document.getElementById("fieldLocation").value = item ? (item.location || "") : "";
+    document.getElementById("fieldReorderThreshold").value = item && item.reorderThreshold !== null ? formatQty(item.reorderThreshold) : "";
+    document.getElementById("fieldOpenShelfLife").value = item && item.openShelfLifeDays !== null ? item.openShelfLifeDays : "";
+    document.getElementById("fieldBarcode").value = item ? (item.barcode || "") : "";
     document.getElementById("fieldNotes").value = item ? (item.notes || "") : "";
 
     var defaultCatId = state.categories.length ? state.categories[0].id : null;
@@ -598,13 +687,18 @@
     var name = document.getElementById("fieldName").value.trim();
     if (!name) return;
 
+    var reorderVal = document.getElementById("fieldReorderThreshold").value;
+    var shelfLifeVal = document.getElementById("fieldOpenShelfLife").value;
+
     var data = {
       name: name,
       categoryId: state.formCategoryId,
       subcategoryId: state.formSubCategoryId || null,
       unit: document.getElementById("fieldUnit").value.trim(),
+      reorderThreshold: reorderVal === "" ? null : roundQty(Number(reorderVal)),
+      openShelfLifeDays: shelfLifeVal === "" ? null : Math.max(1, Number(shelfLifeVal) || 1),
+      barcode: document.getElementById("fieldBarcode").value.trim() || null,
       batches: state.formBatches.map(function (b) { return Object.assign({}, b); }),
-      location: document.getElementById("fieldLocation").value.trim(),
       notes: document.getElementById("fieldNotes").value.trim(),
       updatedAt: new Date().toISOString()
     };
@@ -651,11 +745,7 @@
     withdrawSheet.hidden = false;
   });
 
-  function closeWithdrawSheet() {
-    withdrawSheet.hidden = true;
-    withdrawForm.reset();
-  }
-
+  function closeWithdrawSheet() { withdrawSheet.hidden = true; withdrawForm.reset(); }
   document.getElementById("withdrawCancelBtn").addEventListener("click", closeWithdrawSheet);
   withdrawSheet.addEventListener("click", function (e) { if (e.target === withdrawSheet) closeWithdrawSheet(); });
 
@@ -671,8 +761,7 @@
 
     var reason = document.getElementById("withdrawReason").value.trim();
 
-    // FIFO: deduct from the soonest-expiring batches first.
-    var sorted = item.batches.slice().sort(sortByExpiryAscNullsLast);
+    var sorted = sortBatchesByEffectiveDate(item, item.batches);
     var remaining = amount;
     sorted.forEach(function (b) {
       if (remaining <= 0) return;
@@ -684,15 +773,8 @@
     item.updatedAt = new Date().toISOString();
 
     state.history.unshift({
-      id: uid(),
-      itemId: item.id,
-      name: item.name,
-      categoryId: item.categoryId,
-      unit: item.unit,
-      amount: amount,
-      reason: reason,
-      remainingAfter: itemTotalQty(item),
-      date: new Date().toISOString()
+      id: uid(), itemId: item.id, name: item.name, categoryId: item.categoryId, unit: item.unit,
+      amount: amount, reason: reason, remainingAfter: itemTotalQty(item), date: new Date().toISOString()
     });
     saveHistory();
     saveItems();
@@ -712,11 +794,8 @@
     return state.history.filter(function (h) {
       if (state.historyCategory !== "all") {
         var effCat = getCategory(h.categoryId) ? h.categoryId : null;
-        if (state.historyCategory === "uncategorized") {
-          if (effCat !== null) return false;
-        } else if (effCat !== state.historyCategory) {
-          return false;
-        }
+        if (state.historyCategory === "uncategorized") { if (effCat !== null) return false; }
+        else if (effCat !== state.historyCategory) return false;
       }
       if (state.historySearch) {
         var q = state.historySearch.toLowerCase();
@@ -737,19 +816,16 @@
         '<span class="dot" style="background:' + cat.color + '"></span>' + escapeHtml(cat.name) + '</button>';
     });
     if (hasUncategorized) {
-      html += '<button class="chip' + (state.historyCategory === "uncategorized" ? " is-active" : "") + '" data-category="uncategorized">' +
-        '<span class="dot"></span>Uncategorized</button>';
+      html += '<button class="chip' + (state.historyCategory === "uncategorized" ? " is-active" : "") + '" data-category="uncategorized"><span class="dot"></span>Uncategorized</button>';
     }
     container.innerHTML = html;
   }
 
   document.getElementById("historyCategoryChips").addEventListener("click", function (e) {
-    var btn = e.target.closest(".chip");
-    if (!btn) return;
+    var btn = e.target.closest(".chip"); if (!btn) return;
     state.historyCategory = btn.dataset.category;
     renderHistory();
   });
-
   document.getElementById("historySearchInput").addEventListener("input", function (e) {
     state.historySearch = e.target.value.trim();
     renderHistory();
@@ -774,13 +850,17 @@
       li.className = "item-row";
       var when = new Date(entry.date).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
       li.innerHTML =
-        '<span class="dot item-cat-dot" style="background:' + colorFor(entry.categoryId) + '"></span>' +
-        '<div class="item-main">' +
+        '<div class="item-row-top">' +
+          '<span class="dot item-cat-dot" style="background:' + colorFor(entry.categoryId) + '"></span>' +
           '<p class="item-name"></p>' +
-          '<p class="item-sub"></p>' +
+          '<span class="item-category"></span>' +
         '</div>' +
-        '<div class="item-meta"><span class="item-qty"></span></div>';
+        '<div class="item-row-bottom">' +
+          '<p class="item-sub"></p>' +
+          '<div class="item-meta"><span class="item-qty"></span></div>' +
+        '</div>';
       li.querySelector(".item-name").textContent = entry.name;
+      li.querySelector(".item-category").textContent = categoryName(entry.categoryId);
       li.querySelector(".item-sub").textContent = when + (entry.reason ? " · " + entry.reason : "");
       li.querySelector(".item-qty").textContent = "-" + formatQty(entry.amount) + (entry.unit ? " " + entry.unit : "");
       historyList.appendChild(li);
@@ -806,10 +886,8 @@
       return '<button type="button" class="swatch' + (state.newCategoryColor === color ? " is-active" : "") + '" style="background:' + color + '" data-color="' + color + '"></button>';
     }).join("");
   }
-
   document.getElementById("swatchRow").addEventListener("click", function (e) {
-    var btn = e.target.closest(".swatch");
-    if (!btn) return;
+    var btn = e.target.closest(".swatch"); if (!btn) return;
     state.newCategoryColor = btn.dataset.color;
     renderSwatchRow();
   });
@@ -848,29 +926,19 @@
 
   categoryManageList.addEventListener("click", function (e) {
     var expandBtn = e.target.closest(".cat-expand");
-    if (expandBtn) {
-      var id = expandBtn.dataset.id;
-      state.expandedCategoryIds[id] = !state.expandedCategoryIds[id];
-      renderCategoryManageList();
-      return;
-    }
+    if (expandBtn) { var id = expandBtn.dataset.id; state.expandedCategoryIds[id] = !state.expandedCategoryIds[id]; renderCategoryManageList(); return; }
     var renameBtn = e.target.closest(".cat-rename");
     if (renameBtn) {
-      var cat = getCategory(renameBtn.dataset.id);
-      if (!cat) return;
+      var cat = getCategory(renameBtn.dataset.id); if (!cat) return;
       var name = prompt("Rename category", cat.name);
       if (name && name.trim()) { cat.name = name.trim(); saveCategories(); renderCategoryManageList(); render(); }
       return;
     }
     var delBtn = e.target.closest(".cat-delete");
     if (delBtn) {
-      var id2 = delBtn.dataset.id;
-      var cat2 = getCategory(id2);
-      if (!cat2) return;
+      var id2 = delBtn.dataset.id; var cat2 = getCategory(id2); if (!cat2) return;
       var count = state.items.filter(function (it) { return it.categoryId === id2; }).length;
-      var msg = count > 0
-        ? ('Delete "' + cat2.name + '"? ' + count + " item(s) will become Uncategorized.")
-        : ('Delete "' + cat2.name + '"?');
+      var msg = count > 0 ? ('Delete "' + cat2.name + '"? ' + count + " item(s) will become Uncategorized.") : ('Delete "' + cat2.name + '"?');
       if (!confirm(msg)) return;
       state.items.forEach(function (it) { if (it.categoryId === id2) { it.categoryId = null; it.subcategoryId = null; } });
       state.categories = state.categories.filter(function (c) { return c.id !== id2; });
@@ -881,8 +949,7 @@
     }
     var subRename = e.target.closest(".sub-rename");
     if (subRename) {
-      var sub = getSubcategory(subRename.dataset.parent, subRename.dataset.id);
-      if (!sub) return;
+      var sub = getSubcategory(subRename.dataset.parent, subRename.dataset.id); if (!sub) return;
       var sname = prompt("Rename subcategory", sub.name);
       if (sname && sname.trim()) { sub.name = sname.trim(); saveCategories(); renderCategoryManageList(); render(); }
       return;
@@ -890,8 +957,7 @@
     var subDelete = e.target.closest(".sub-delete");
     if (subDelete) {
       var pid = subDelete.dataset.parent, sid = subDelete.dataset.id;
-      var pcat = getCategory(pid);
-      if (!pcat) return;
+      var pcat = getCategory(pid); if (!pcat) return;
       if (!confirm("Delete this subcategory? Items using it will keep their main category.")) return;
       pcat.subcategories = pcat.subcategories.filter(function (s) { return s.id !== sid; });
       state.items.forEach(function (it) { if (it.categoryId === pid && it.subcategoryId === sid) it.subcategoryId = null; });
@@ -903,8 +969,7 @@
     if (addSubBtn) {
       var pid3 = addSubBtn.dataset.parent;
       var input = categoryManageList.querySelector('.new-sub-input[data-parent="' + pid3 + '"]');
-      var newName = input.value.trim();
-      if (!newName) return;
+      var newName = input.value.trim(); if (!newName) return;
       var pcat3 = getCategory(pid3);
       pcat3.subcategories.push({ id: uid(), name: newName });
       input.value = "";
@@ -925,8 +990,7 @@
 
   document.getElementById("addCategoryBtn").addEventListener("click", function () {
     var input = document.getElementById("newCategoryName");
-    var name = input.value.trim();
-    if (!name) return;
+    var name = input.value.trim(); if (!name) return;
     state.categories.push({ id: uid(), name: name, color: state.newCategoryColor || SWATCHES[0], subcategories: [] });
     input.value = "";
     saveCategories();
@@ -965,7 +1029,6 @@
     var urgentDays = Math.max(0, Number(document.getElementById("settingUrgentDays").value) || 0);
     var depletionThreshold = roundQty(Math.max(0, Number(document.getElementById("settingDepletionThreshold").value) || 0));
     if (urgentDays > soonDays) urgentDays = soonDays;
-
     state.settings = { soonDays: soonDays, urgentDays: urgentDays, depletionThreshold: depletionThreshold };
     saveSettings();
     thresholdsSheet.hidden = true;
@@ -982,17 +1045,15 @@
     var expiringSoon = state.items.filter(isSoon).length;
     var expired = state.items.filter(function (it) {
       return it.batches.some(function (b) {
-        var d = daysUntil(b.expiry);
-        return d !== null && d < 0;
+        var eff = getBatchEffectiveDate(it, b);
+        return eff && daysUntil(eff.date) < 0;
       });
     }).length;
     var depleted = state.items.filter(isDepleted).length;
     var totalWithdrawn = state.history.reduce(function (sum, h) { return sum + (Number(h.amount) || 0); }, 0);
     var subCount = state.categories.reduce(function (sum, c) { return sum + c.subcategories.length; }, 0);
 
-    var bytes = (localStorage.getItem(STORAGE_KEY) || "").length +
-      (localStorage.getItem(HISTORY_KEY) || "").length +
-      (localStorage.getItem(CATEGORIES_KEY) || "").length;
+    var bytes = JSON.stringify(state.items).length + JSON.stringify(state.history).length + JSON.stringify(state.categories).length;
     var kb = (bytes / 1024).toFixed(1);
 
     var rows = [
@@ -1004,7 +1065,7 @@
       ["Depleted (≤ " + formatQty(state.settings.depletionThreshold) + ")", depleted],
       ["Withdrawals logged", state.history.length],
       ["Units withdrawn all-time", formatQty(totalWithdrawn)],
-      ["Storage used", kb + " KB"]
+      ["Storage used (approx.)", kb + " KB"]
     ];
 
     var html = rows.map(function (r) {
@@ -1022,7 +1083,6 @@
         html += '<li class="stat-row"><span class="stat-label"><span class="dot"></span>Uncategorized</span><span class="stat-value">' + uncategorizedCount + '</span></li>';
       }
     }
-
     statsList.innerHTML = html;
   }
 
@@ -1033,6 +1093,86 @@
   });
   document.getElementById("statsCloseBtn").addEventListener("click", function () { statsSheet.hidden = true; });
   statsSheet.addEventListener("click", function (e) { if (e.target === statsSheet) statsSheet.hidden = true; });
+
+  // ---------- import options sheet ----------
+
+  function mergeById(existing, incoming) {
+    var existingIds = {};
+    existing.forEach(function (x) { existingIds[x.id] = true; });
+    var added = incoming.filter(function (x) { return !existingIds[x.id]; });
+    return existing.concat(added);
+  }
+
+  var importOptionsSheet = document.getElementById("importOptionsSheet");
+  var importOptionsForm = document.getElementById("importOptionsForm");
+
+  document.getElementById("importItemsSegmented").addEventListener("click", function (e) {
+    var btn = e.target.closest(".segment"); if (!btn) return;
+    this.querySelectorAll(".segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
+  });
+  document.getElementById("importHistorySegmented").addEventListener("click", function (e) {
+    var btn = e.target.closest(".segment"); if (!btn) return;
+    this.querySelectorAll(".segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
+  });
+
+  document.getElementById("importInput").addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var parsed = JSON.parse(reader.result);
+        var importedItems = Array.isArray(parsed) ? parsed : parsed.items;
+        var importedHistory = Array.isArray(parsed) ? [] : (parsed.history || []);
+        var importedCategories = Array.isArray(parsed) ? null : (parsed.categories || null);
+        var importedSettings = Array.isArray(parsed) ? null : (parsed.settings || null);
+        if (!Array.isArray(importedItems)) throw new Error("File is not a valid backup");
+
+        state.pendingImport = { items: importedItems, history: importedHistory, categories: importedCategories, settings: importedSettings };
+
+        document.getElementById("importSummaryLine").textContent =
+          "This backup has " + importedItems.length + " item(s) and " + importedHistory.length +
+          " withdrawal record(s). You currently have " + state.items.length + " item(s) and " +
+          state.history.length + " record(s) on this device.";
+
+        document.querySelectorAll("#importItemsSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "merge"); });
+        document.querySelectorAll("#importHistorySegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "merge"); });
+
+        settingsSheet.hidden = true;
+        importOptionsSheet.hidden = false;
+      } catch (err) {
+        alert("Could not read that file: " + err.message);
+      }
+      e.target.value = "";
+    };
+    reader.readAsText(file);
+  });
+
+  function closeImportOptions() { state.pendingImport = null; importOptionsSheet.hidden = true; }
+  document.getElementById("importCancelBtn").addEventListener("click", closeImportOptions);
+  importOptionsSheet.addEventListener("click", function (e) { if (e.target === importOptionsSheet) closeImportOptions(); });
+
+  importOptionsForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (!state.pendingImport) return;
+    var itemsMode = document.querySelector("#importItemsSegmented .segment.is-active").dataset.mode;
+    var historyMode = document.querySelector("#importHistorySegmented .segment.is-active").dataset.mode;
+
+    state.items = itemsMode === "replace" ? state.pendingImport.items : mergeById(state.items, state.pendingImport.items);
+    state.history = historyMode === "replace" ? state.pendingImport.history : mergeById(state.history, state.pendingImport.history);
+
+    if (state.pendingImport.categories) {
+      state.pendingImport.categories.forEach(function (ic) { if (!getCategory(ic.id)) state.categories.push(ic); });
+    }
+    if (state.pendingImport.settings) state.settings = state.pendingImport.settings;
+
+    migrateItems(state.items);
+    saveItems(); saveHistory(); saveCategories(); saveSettings();
+
+    state.pendingImport = null;
+    importOptionsSheet.hidden = true;
+    render();
+  });
 
   // ---------- settings sheet ----------
 
@@ -1052,102 +1192,6 @@
     URL.revokeObjectURL(url);
   });
 
-  var importOptionsSheet = document.getElementById("importOptionsSheet");
-  var importOptionsForm = document.getElementById("importOptionsForm");
-
-  document.getElementById("importItemsSegmented").addEventListener("click", function (e) {
-    var btn = e.target.closest(".segment");
-    if (!btn) return;
-    this.querySelectorAll(".segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
-  });
-  document.getElementById("importHistorySegmented").addEventListener("click", function (e) {
-    var btn = e.target.closest(".segment");
-    if (!btn) return;
-    this.querySelectorAll(".segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
-  });
-
-  document.getElementById("importInput").addEventListener("change", function (e) {
-    var file = e.target.files[0];
-    if (!file) return;
-    var reader = new FileReader();
-    reader.onload = function () {
-      try {
-        var parsed = JSON.parse(reader.result);
-        var importedItems = Array.isArray(parsed) ? parsed : parsed.items;
-        var importedHistory = Array.isArray(parsed) ? [] : (parsed.history || []);
-        var importedCategories = Array.isArray(parsed) ? null : (parsed.categories || null);
-        var importedSettings = Array.isArray(parsed) ? null : (parsed.settings || null);
-        if (!Array.isArray(importedItems)) throw new Error("File is not a valid backup");
-
-        state.pendingImport = {
-          items: importedItems,
-          history: importedHistory,
-          categories: importedCategories,
-          settings: importedSettings
-        };
-
-        document.getElementById("importSummaryLine").textContent =
-          "This backup has " + importedItems.length + " item(s) and " + importedHistory.length +
-          " withdrawal record(s). You currently have " + state.items.length + " item(s) and " +
-          state.history.length + " record(s) on this device.";
-
-        document.querySelectorAll("#importItemsSegmented .segment").forEach(function (s) {
-          s.classList.toggle("is-active", s.dataset.mode === "merge");
-        });
-        document.querySelectorAll("#importHistorySegmented .segment").forEach(function (s) {
-          s.classList.toggle("is-active", s.dataset.mode === "merge");
-        });
-
-        settingsSheet.hidden = true;
-        importOptionsSheet.hidden = false;
-      } catch (err) {
-        alert("Could not read that file: " + err.message);
-      }
-      e.target.value = "";
-    };
-    reader.readAsText(file);
-  });
-
-  function closeImportOptions() {
-    state.pendingImport = null;
-    importOptionsSheet.hidden = true;
-  }
-  document.getElementById("importCancelBtn").addEventListener("click", closeImportOptions);
-  importOptionsSheet.addEventListener("click", function (e) { if (e.target === importOptionsSheet) closeImportOptions(); });
-
-  importOptionsForm.addEventListener("submit", function (e) {
-    e.preventDefault();
-    if (!state.pendingImport) return;
-
-    var itemsMode = document.querySelector("#importItemsSegmented .segment.is-active").dataset.mode;
-    var historyMode = document.querySelector("#importHistorySegmented .segment.is-active").dataset.mode;
-
-    state.items = itemsMode === "replace"
-      ? state.pendingImport.items
-      : mergeById(state.items, state.pendingImport.items);
-
-    state.history = historyMode === "replace"
-      ? state.pendingImport.history
-      : mergeById(state.history, state.pendingImport.history);
-
-    if (state.pendingImport.categories) {
-      state.pendingImport.categories.forEach(function (ic) {
-        if (!getCategory(ic.id)) state.categories.push(ic);
-      });
-    }
-    if (state.pendingImport.settings) state.settings = state.pendingImport.settings;
-
-    migrateItems(state.items);
-    saveItems();
-    saveHistory();
-    saveCategories();
-    saveSettings();
-
-    state.pendingImport = null;
-    importOptionsSheet.hidden = true;
-    render();
-  });
-
   document.getElementById("clearAllBtn").addEventListener("click", function () {
     if (!confirm("Delete every item in Depot? This can't be undone.")) return;
     state.items = [];
@@ -1160,11 +1204,34 @@
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("sw.js").catch(function (err) {
-        console.warn("Service worker registration failed", err);
-      });
+      navigator.serviceWorker.register("sw.js").catch(function (err) { console.warn("Service worker registration failed", err); });
     });
   }
 
-  render();
+  // ---------- boot ----------
+
+  function boot() {
+    return migrateFromLocalStorage().then(function () {
+      return Promise.all([idbGetAll("items"), idbGetAll("history"), idbGetAll("categories"), idbGetKV("settings", null)]);
+    }).then(function (results) {
+      state.items = results[0];
+      state.history = results[1];
+      var catsFromDb = results[2];
+      state.categories = catsFromDb.length ? catsFromDb : defaultCategories();
+      state.settings = results[3] || { soonDays: 30, urgentDays: 7, depletionThreshold: 0 };
+
+      var itemsChanged = migrateItems(state.items);
+      var historyChanged = migrateHistory(state.history);
+      if (itemsChanged) saveItems();
+      if (historyChanged) saveHistory();
+      if (!catsFromDb.length) saveCategories();
+
+      render();
+    }).catch(function (err) {
+      console.error("Depot failed to initialize storage", err);
+      alert("Depot couldn't load its storage. Try reloading the app. If this keeps happening, export whatever backup you can and let me know.");
+    });
+  }
+
+  boot();
 })();

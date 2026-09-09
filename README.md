@@ -1,0 +1,232 @@
+# Depot
+
+An offline-first inventory tracker for food, medical supplies, and devices.
+Everything is stored on-device (browser localStorage) — there's no server
+and no network calls, so it works exactly the same with wifi off.
+
+## 1. Try it right now (no install needed)
+
+Just open `www/index.html` directly in a browser. Everything works —
+add items, filter, search, export/import — except the offline
+service worker, which browsers only activate over `http(s)://`, not
+`file://`.
+
+## 2. Run it as a proper local website (activates offline caching)
+
+From the `depot` folder:
+
+```bash
+cd www
+python3 -m http.server 8080
+```
+
+Then open `http://localhost:8080` in a browser. Now the service worker
+will register, and if you go into airplane mode and reload, it still
+loads instantly from cache. This is also exactly what you'd copy onto
+a Raspberry Pi — just serve the `www` folder with any lightweight
+static server (`python3 -m http.server`, `busybox httpd`, `nginx`, etc.)
+and open it in a browser on that device.
+
+## 3. Wrap it as an Android APK (Capacitor)
+
+You'll need Node.js and Android Studio installed for this part — I can't
+run these commands myself since I don't have network access in this
+environment, but each step below is copy-paste ready.
+
+```bash
+cd depot
+npm install
+npx cap add android
+npx cap sync android
+npx cap open android
+```
+
+That last command opens the project in Android Studio. From there:
+
+1. Let Gradle finish syncing (first time takes a few minutes).
+2. **Build → Build Bundle(s) / APK(s) → Build APK(s)**.
+3. Android Studio will generate an unsigned debug APK automatically —
+   fine for testing on your own device via USB debugging.
+4. For a version you'll keep reinstalling over time (so your data and
+   app updates survive), generate a proper keystore once via
+   **Build → Generate Signed Bundle / APK**, and keep that keystore
+   file somewhere safe — you'll reuse it for every future build of
+   this app.
+5. To install without the Play Store, either run `npx cap run android`
+   with your phone connected via USB debugging, or copy the built
+   `.apk` file to your phone and open it (you'll need to allow
+   "install unknown apps" for whichever app you use to open it).
+
+### Before your first real build
+
+- **App icon**: `manifest.json` currently has an empty `icons` array.
+  Capacitor will use a placeholder icon until you drop your own into
+  `android/app/src/main/res/` (Android Studio's Image Asset Studio,
+  right-click `res` → New → Image Asset, makes this easy).
+- Re-run `npx cap sync android` any time you change files in `www/`
+  before rebuilding, so Android picks up the changes.
+
+## Categories
+
+Food / Medical / Devices / Other are no longer fixed — they're your
+starting point. Add, rename, or delete top-level categories from
+**Settings → Manage categories**, and give each one any number of
+subcategories underneath it (e.g. Food → Tinned, Dried, Water). The
+item form and the main filter bar both follow this two-level
+structure. Deleting a category doesn't delete its items — they fall
+back to "Uncategorized" instead.
+
+## Use by / Best before
+
+Each expiry date carries a flag: **Use by** (a safety cut-off — shows
+red once inside 7 days) or **Best before** (a quality guide only — never
+shows red, just the softer "soon" colour, since it's still fine to use).
+"Expiring soon only" catches both kinds the same way, within 30 days.
+
+## Fractional quantities
+
+Quantities support up to 2 decimal places — useful for a "1 pack" item
+where you consume it in fractions (e.g. withdraw 0.25 of a pack of
+biscuits). Everything (batch quantities, withdrawals, totals, the
+depletion threshold) accepts and displays decimals; trailing zeros are
+trimmed for display (1.50 shows as "1.5", 1.00 shows as "1").
+
+## Batches
+
+Each item can hold multiple batches — separate quantity + expiry date
+pairs, so "Tinned Tuna" can have 3 units expiring in March, 5 in June,
+and 15 with no date at all, all under one item. The main list shows
+the combined total, but the expiry badge always reflects whichever
+batch is most at risk, with that batch's quantity shown alongside it
+(e.g. "In 5d (3)") — so you can see what needs attention without
+opening the item.
+
+Items are never deleted automatically. Withdrawing stock (see below)
+draws from the soonest-expiring batch first and removes a batch once
+it hits zero, but the item itself stays — even at zero total — so it
+doesn't get forgotten when it's time to restock.
+
+## Depleted filter
+
+Toggle **Depleted only** to see every item at or below your depletion
+threshold (0 by default, meaning fully out) — useful for a restock
+list precisely because depleted items are retained rather than
+deleted.
+
+## Thresholds
+
+**Settings → Adjust thresholds** controls, app-wide: the "expiring
+soon" window (default 30 days), the "urgent" window inside that
+(default 7 days, only affects Use By dates — Best Before never goes
+red), and the depletion threshold used by the Depleted filter.
+
+## Use by / Best before
+
+Each batch's expiry date carries a flag: **Use by** (a safety cut-off
+— turns red once inside the urgent window) or **Best before** (a
+quality guide only — never red, just the softer "soon" colour, since
+it's still fine to use). "Expiring soon only" catches both kinds the
+same way.
+
+## Withdrawal history
+
+**Settings → View withdrawal history** now has a search box (matches
+item name, reason, category name, and the displayed date) and a
+category filter, the same "Uncategorized" bucket applies here as
+everywhere else if a withdrawal's original category was later deleted.
+
+## Importing backups
+
+Choosing a backup file no longer merges immediately — it opens an
+**Import backup** screen showing how many items and withdrawal
+records are in the file versus what's already on your device, with
+independent Merge/Replace choices for items and for history. Merge
+adds only records with an id you don't already have (matched by
+each record's internal id, not its content), so re-importing the
+same backup, or importing after only wiping items, can't create
+duplicates in either list.
+
+Open an existing item and tap **Withdraw** to take some of it out of
+stock — enter how much, and optionally why (used in dinner, expired,
+broke, gave away). The amount is deducted from the soonest-expiring
+batch(es) first; any batch that reaches zero is removed, but the item
+itself is retained regardless of its resulting total. Every withdrawal
+is recorded in **Settings → View withdrawal history**, including for
+items that are now fully depleted.
+
+## Data model
+
+Items are stored as a flat JSON array in `localStorage` under the key
+`depot.items.v1`. Each item:
+
+```json
+{
+  "id": "string",
+  "name": "string",
+  "categoryId": "string or null",
+  "subcategoryId": "string or null",
+  "unit": "string",
+  "batches": [
+    {
+      "id": "string",
+      "quantity": 0,
+      "expiry": "YYYY-MM-DD or null",
+      "expiryType": "use_by | best_before | null"
+    }
+  ],
+  "location": "string",
+  "notes": "string",
+  "updatedAt": "ISO timestamp"
+}
+```
+
+Categories are stored under `depot.categories.v1`:
+
+```json
+{
+  "id": "string",
+  "name": "string",
+  "color": "#hex",
+  "subcategories": [{ "id": "string", "name": "string" }]
+}
+```
+
+Thresholds are stored under `depot.settings.v1`:
+
+```json
+{ "soonDays": 30, "urgentDays": 7, "depletionThreshold": 0 }
+```
+
+Withdrawals are stored separately (so they outlive a deleted item)
+as a flat JSON array under `depot.history.v1`, newest first:
+
+```json
+{
+  "id": "string",
+  "itemId": "string",
+  "name": "string",
+  "categoryId": "string or null",
+  "unit": "string",
+  "amount": 0,
+  "reason": "string",
+  "remainingAfter": 0,
+  "date": "ISO timestamp"
+}
+```
+
+Use **Settings → Export backup** regularly — since this is local-only
+storage, uninstalling the app or clearing browser data deletes it.
+The exported file contains `items`, `history`, `categories`, and
+`settings`; older backups still import fine.
+
+## Pass 2 changes (storage engine, open shelf life, batch-level location)
+
+- **Storage moved from localStorage to IndexedDB.** Existing data migrates automatically and non-destructively on first load — old localStorage keys are left in place untouched as a safety net, they're just no longer read after migration. This removes the ~5-10MB ceiling localStorage had and gives room for photos or larger datasets later without another migration.
+- **Location moved from the item to each batch.** A single item can now have stock in multiple places at once; the main list shows the distinct set of locations across its batches.
+- **Reorder threshold** (per item) and **Open Shelf Life** (days, per item) plus **Open Date** (per batch) are new fields. Reorder threshold will feed the shopping list in a later pass. Open Shelf Life + Open Date let a batch's *actual* risk be "opened 3 days ago, good for 5" rather than only a printed date — whichever limit is sooner is what's shown and used everywhere (sorting, filters, FIFO withdrawal).
+- **Barcode** field added to items (manual entry for now) — camera scanning comes in a later pass; this just avoids another schema migration when it lands.
+- **Location autocomplete** on the batch location field, suggesting from locations you've already used, to avoid near-duplicate strings ("Garage Shelf 2" vs "garage shelf 2") fragmenting things later.
+- **Main list rows restructured** into two lines (name + category on top, quantity + expiry below) so a long expiry/quantity string never squeezes the item name.
+- **Orientation lock removed** — landscape now works.
+
+Still to come in later passes: location filter chips, shopping list generation (using reorder threshold + depleted + near-expiry), Web Share for the shopping list, CSV export, the location audit/stocktake workflow, and camera-based barcode scanning.

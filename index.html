@@ -61,6 +61,19 @@
       <input type="text" id="fieldUnit" placeholder="e.g. cans, boxes">
     </label>
 
+    <div class="field-row">
+      <label>Reorder threshold <span class="hint">(optional)</span>
+        <input type="number" id="fieldReorderThreshold" min="0" step="0.01" inputmode="decimal" placeholder="e.g. 2">
+      </label>
+      <label>Once opened, good for <span class="hint">(days, optional)</span>
+        <input type="number" id="fieldOpenShelfLife" min="1" step="1" inputmode="numeric" placeholder="e.g. 5">
+      </label>
+    </div>
+
+    <label>Barcode <span class="hint">(optional — scan support coming soon, type it for now)</span>
+      <input type="text" id="fieldBarcode" inputmode="numeric" maxlength="40">
+    </label>
+
     <div class="batches-section">
       <div class="batches-header">
         <span>Batches</span>
@@ -69,10 +82,6 @@
       <ul id="formBatchList" class="batch-list"></ul>
       <button type="button" id="addBatchBtn" class="btn-secondary">Add batch</button>
     </div>
-
-    <label>Location <span class="hint">(optional)</span>
-      <input type="text" id="fieldLocation" placeholder="e.g. Garage shelf 2" maxlength="60">
-    </label>
 
     <label>Notes <span class="hint">(optional)</span>
       <textarea id="fieldNotes" rows="2" maxlength="300"></textarea>
@@ -105,6 +114,15 @@
       <button type="button" class="segment is-active" data-type="use_by">Use by</button>
       <button type="button" class="segment" data-type="best_before">Best before</button>
     </div>
+
+    <label>Open date <span class="hint">(optional — starts the "once opened" countdown above)</span>
+      <input type="date" id="batchOpenDate">
+    </label>
+
+    <label>Location <span class="hint">(optional)</span>
+      <input type="text" id="batchLocation" list="locationSuggestions" placeholder="e.g. Garage shelf 2" maxlength="60">
+      <datalist id="locationSuggestions"></datalist>
+    </label>
 
     <div class="sheet-actions">
       <button type="button" id="batchCancelBtn" class="btn-ghost">Cancel</button>
