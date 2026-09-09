@@ -1637,7 +1637,7 @@
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("sw.js").then(function (reg) {
+      navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(function (reg) {
         // Every time the app opens, explicitly ask the browser to check the
         // network for a newer sw.js, rather than waiting for it to notice on its own.
         reg.update();
