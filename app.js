@@ -1,0 +1,1170 @@
+(function () {
+  "use strict";
+
+  var STORAGE_KEY = "depot.items.v1";
+  var HISTORY_KEY = "depot.history.v1";
+  var CATEGORIES_KEY = "depot.categories.v1";
+  var SETTINGS_KEY = "depot.settings.v1";
+  var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
+
+  var state = {
+    items: [],
+    history: [],
+    categories: [],
+    settings: { soonDays: 30, urgentDays: 7, depletionThreshold: 0 },
+    activeCategory: "all",
+    activeSubCategory: "all",
+    search: "",
+    soonOnly: false,
+    depletedOnly: false,
+    editingId: null,
+    formCategoryId: null,
+    formSubCategoryId: null,
+    formBatches: [],
+    editingBatchId: null,
+    newCategoryColor: SWATCHES[0],
+    expandedCategoryIds: {},
+    historySearch: "",
+    historyCategory: "all",
+    pendingImport: null
+  };
+
+  // ---------- persistence ----------
+
+  function loadItems() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      console.error("Could not read stored items", e);
+      return [];
+    }
+  }
+  function saveItems() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.items)); }
+
+  function loadHistory() {
+    try {
+      var raw = localStorage.getItem(HISTORY_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      console.error("Could not read withdrawal history", e);
+      return [];
+    }
+  }
+  function saveHistory() { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history)); }
+
+  function loadCategories() {
+    try {
+      var raw = localStorage.getItem(CATEGORIES_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {
+      console.error("Could not read categories", e);
+    }
+    var defaults = [
+      { id: "food", name: "Food", color: "#6B8F47", subcategories: [] },
+      { id: "medical", name: "Medical", color: "#B23A48", subcategories: [] },
+      { id: "devices", name: "Devices", color: "#3E6C8C", subcategories: [] },
+      { id: "other", name: "Other", color: "#8A6E4B", subcategories: [] }
+    ];
+    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(defaults));
+    return defaults;
+  }
+  function saveCategories() { localStorage.setItem(CATEGORIES_KEY, JSON.stringify(state.categories)); }
+
+  function loadSettings() {
+    try {
+      var raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        return {
+          soonDays: Number(parsed.soonDays) || 30,
+          urgentDays: parsed.urgentDays !== undefined ? Number(parsed.urgentDays) : 7,
+          depletionThreshold: parsed.depletionThreshold !== undefined ? Number(parsed.depletionThreshold) : 0
+        };
+      }
+    } catch (e) {
+      console.error("Could not read settings", e);
+    }
+    return { soonDays: 30, urgentDays: 7, depletionThreshold: 0 };
+  }
+  function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings)); }
+
+  function migrateItems(items) {
+    var changed = false;
+    items.forEach(function (it) {
+      if (it.categoryId === undefined) { it.categoryId = it.category || null; changed = true; }
+      if (it.category !== undefined) { delete it.category; changed = true; }
+      if (it.subcategoryId === undefined) { it.subcategoryId = null; changed = true; }
+
+      if (it.batches === undefined) {
+        it.batches = [{
+          id: uid(),
+          quantity: Number(it.quantity) || 0,
+          expiry: it.expiry || null,
+          expiryType: it.expiry ? (it.expiryType || "use_by") : null
+        }];
+        delete it.quantity;
+        delete it.expiry;
+        delete it.expiryType;
+        changed = true;
+      }
+    });
+    return changed;
+  }
+
+  function migrateHistory(history) {
+    var changed = false;
+    history.forEach(function (h) {
+      if (h.categoryId === undefined && h.category !== undefined) {
+        h.categoryId = h.category; delete h.category; changed = true;
+      }
+    });
+    return changed;
+  }
+
+  state.items = loadItems();
+  if (migrateItems(state.items)) saveItems();
+  state.history = loadHistory();
+  if (migrateHistory(state.history)) saveHistory();
+  state.categories = loadCategories();
+  state.settings = loadSettings();
+
+  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+  function roundQty(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+  function formatQty(n) { return String(parseFloat(roundQty(n).toFixed(2))); }
+
+  function mergeById(existing, incoming) {
+    var existingIds = {};
+    existing.forEach(function (x) { existingIds[x.id] = true; });
+    var added = incoming.filter(function (x) { return !existingIds[x.id]; });
+    return existing.concat(added);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // ---------- category helpers ----------
+
+  function getCategory(id) {
+    return state.categories.find(function (c) { return c.id === id; }) || null;
+  }
+  function getSubcategory(catId, subId) {
+    var cat = getCategory(catId);
+    if (!cat) return null;
+    return cat.subcategories.find(function (s) { return s.id === subId; }) || null;
+  }
+  function colorFor(categoryId) {
+    var cat = getCategory(categoryId);
+    return cat ? cat.color : "var(--uncategorized)";
+  }
+  function categoryName(categoryId) {
+    var cat = getCategory(categoryId);
+    return cat ? cat.name : "Uncategorized";
+  }
+
+  // ---------- batch / expiry helpers ----------
+
+  function itemTotalQty(item) {
+    return roundQty(item.batches.reduce(function (sum, b) { return sum + (Number(b.quantity) || 0); }, 0));
+  }
+
+  function sortByExpiryAscNullsLast(a, b) {
+    var da = daysUntil(a.expiry), db = daysUntil(b.expiry);
+    if (da === null && db === null) return 0;
+    if (da === null) return 1;
+    if (db === null) return -1;
+    return da - db;
+  }
+
+  function daysUntil(dateStr) {
+    if (!dateStr) return null;
+    var today = new Date();
+    today.setHours(0, 0, 0, 0);
+    var target = new Date(dateStr + "T00:00:00");
+    return Math.round((target - today) / 86400000);
+  }
+
+  function formatDate(dateStr) {
+    var d = new Date(dateStr + "T00:00:00");
+    return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  }
+
+  function expiryStatus(dateStr, type) {
+    var d = daysUntil(dateStr);
+    if (d === null) return { label: "No expiry", cls: "" };
+
+    var soonDays = state.settings.soonDays;
+    var urgentDays = state.settings.urgentDays;
+
+    var label;
+    if (d < 0) label = "Expired " + Math.abs(d) + "d ago";
+    else if (d === 0) label = "Expires today";
+    else if (d <= soonDays) label = "In " + d + "d";
+    else label = formatDate(dateStr);
+
+    var isBestBefore = type === "best_before";
+    if (isBestBefore) label += " · Best before";
+
+    var cls;
+    if (isBestBefore) {
+      cls = d <= soonDays ? "expiry-soon" : "expiry-fine";
+    } else {
+      if (d <= urgentDays) cls = "expiry-urgent";
+      else if (d <= soonDays) cls = "expiry-soon";
+      else cls = "expiry-fine";
+    }
+    return { label: label, cls: cls };
+  }
+
+  var STATUS_RANK = { "expiry-urgent": 3, "expiry-soon": 2, "expiry-fine": 1, "": 0 };
+
+  function worstBatchStatus(item) {
+    var withDates = item.batches.filter(function (b) { return b.expiry; });
+    if (withDates.length === 0) return null;
+    var worst = null;
+    withDates.forEach(function (b) {
+      var s = expiryStatus(b.expiry, b.expiryType);
+      if (!worst || STATUS_RANK[s.cls] > STATUS_RANK[worst.status.cls]) worst = { batch: b, status: s };
+    });
+    return worst;
+  }
+
+  function isSoon(item) {
+    return item.batches.some(function (b) {
+      var d = daysUntil(b.expiry);
+      return d !== null && d <= state.settings.soonDays;
+    });
+  }
+
+  function isDepleted(item) {
+    return itemTotalQty(item) <= state.settings.depletionThreshold;
+  }
+
+  // ---------- main list rendering ----------
+
+  var listEl = document.getElementById("itemList");
+  var emptyEl = document.getElementById("emptyState");
+  var emptyTextEl = document.getElementById("emptyStateText");
+
+  function visibleItems() {
+    return state.items
+      .filter(function (it) {
+        var effCat = getCategory(it.categoryId) ? it.categoryId : null;
+        if (state.activeCategory !== "all") {
+          if (state.activeCategory === "uncategorized") {
+            if (effCat !== null) return false;
+          } else {
+            if (effCat !== state.activeCategory) return false;
+            if (state.activeSubCategory !== "all" && it.subcategoryId !== state.activeSubCategory) return false;
+          }
+        }
+        if (state.soonOnly && !isSoon(it)) return false;
+        if (state.depletedOnly && !isDepleted(it)) return false;
+        if (state.search) {
+          var q = state.search.toLowerCase();
+          var hay = (it.name + " " + (it.location || "") + " " + (it.notes || "")).toLowerCase();
+          if (hay.indexOf(q) === -1) return false;
+        }
+        return true;
+      })
+      .sort(function (a, b) {
+        var wa = worstBatchStatus(a), wb = worstBatchStatus(b);
+        var da = wa ? daysUntil(wa.batch.expiry) : null;
+        var db = wb ? daysUntil(wb.batch.expiry) : null;
+        if (da === null && db === null) return a.name.localeCompare(b.name);
+        if (da === null) return 1;
+        if (db === null) return -1;
+        return da - db;
+      });
+  }
+
+  function renderCategoryFilters() {
+    var container = document.getElementById("categoryChips");
+    var hasUncategorized = state.items.some(function (it) { return !getCategory(it.categoryId); });
+
+    var html = '<button class="chip' + (state.activeCategory === "all" ? " is-active" : "") + '" data-category="all">All</button>';
+    state.categories.forEach(function (cat) {
+      html += '<button class="chip' + (state.activeCategory === cat.id ? " is-active" : "") + '" data-category="' + cat.id + '">' +
+        '<span class="dot" style="background:' + cat.color + '"></span>' + escapeHtml(cat.name) + '</button>';
+    });
+    if (hasUncategorized) {
+      html += '<button class="chip' + (state.activeCategory === "uncategorized" ? " is-active" : "") + '" data-category="uncategorized">' +
+        '<span class="dot"></span>Uncategorized</button>';
+    }
+    container.innerHTML = html;
+  }
+
+  function renderSubCategoryFilters() {
+    var container = document.getElementById("subCategoryChips");
+    var cat = getCategory(state.activeCategory);
+    if (!cat || cat.subcategories.length === 0) {
+      container.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+    container.hidden = false;
+    var html = '<button class="chip' + (state.activeSubCategory === "all" ? " is-active" : "") + '" data-sub="all">All</button>';
+    cat.subcategories.forEach(function (sub) {
+      html += '<button class="chip' + (state.activeSubCategory === sub.id ? " is-active" : "") + '" data-sub="' + sub.id + '">' + escapeHtml(sub.name) + '</button>';
+    });
+    container.innerHTML = html;
+  }
+
+  function render() {
+    renderCategoryFilters();
+    renderSubCategoryFilters();
+
+    var items = visibleItems();
+    listEl.innerHTML = "";
+
+    if (items.length === 0) {
+      emptyEl.hidden = false;
+      listEl.hidden = true;
+      emptyTextEl.textContent = state.items.length === 0 ? "Nothing stored yet." : "Nothing matches this filter.";
+      document.getElementById("emptyAddBtn").hidden = state.items.length !== 0;
+      return;
+    }
+    emptyEl.hidden = true;
+    listEl.hidden = false;
+
+    items.forEach(function (item) {
+      var li = document.createElement("li");
+      li.className = "item-row";
+      li.dataset.id = item.id;
+
+      var total = itemTotalQty(item);
+      var worst = worstBatchStatus(item);
+
+      var subParts = [categoryName(item.categoryId)];
+      var subName = getSubcategory(item.categoryId, item.subcategoryId);
+      if (subName) subParts.push(subName.name);
+      if (item.location) subParts.push(item.location);
+
+      var expiryLabel, expiryCls;
+      if (total === 0) {
+        expiryLabel = "Depleted";
+        expiryCls = "expiry-urgent";
+      } else if (worst) {
+        expiryLabel = worst.status.label + " (" + formatQty(worst.batch.quantity) + (item.unit ? " " + item.unit : "") + ")";
+        expiryCls = worst.status.cls;
+      } else {
+        expiryLabel = "";
+        expiryCls = "";
+      }
+
+      li.innerHTML =
+        '<span class="dot item-cat-dot" style="background:' + colorFor(item.categoryId) + '"></span>' +
+        '<div class="item-main">' +
+          '<p class="item-name"></p>' +
+          '<p class="item-sub"></p>' +
+        '</div>' +
+        '<div class="item-meta">' +
+          '<span class="item-qty"></span>' +
+          '<span class="item-expiry ' + expiryCls + '"></span>' +
+        '</div>';
+
+      li.querySelector(".item-name").textContent = item.name;
+      li.querySelector(".item-sub").textContent = subParts.join(" · ");
+      li.querySelector(".item-qty").textContent = formatQty(total) + (item.unit ? " " + item.unit : "");
+      li.querySelector(".item-expiry").textContent = expiryLabel;
+
+      li.addEventListener("click", function () { openForm(item.id); });
+      listEl.appendChild(li);
+    });
+  }
+
+  document.getElementById("categoryChips").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip");
+    if (!btn) return;
+    state.activeCategory = btn.dataset.category;
+    state.activeSubCategory = "all";
+    render();
+  });
+
+  document.getElementById("subCategoryChips").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip");
+    if (!btn) return;
+    state.activeSubCategory = btn.dataset.sub;
+    render();
+  });
+
+  document.getElementById("soonToggle").addEventListener("change", function (e) {
+    state.soonOnly = e.target.checked;
+    render();
+  });
+
+  document.getElementById("depletedToggle").addEventListener("change", function (e) {
+    state.depletedOnly = e.target.checked;
+    render();
+  });
+
+  document.getElementById("searchInput").addEventListener("input", function (e) {
+    state.search = e.target.value.trim();
+    render();
+  });
+
+  // ---------- add/edit sheet ----------
+
+  var itemSheet = document.getElementById("itemSheet");
+  var itemForm = document.getElementById("itemForm");
+  var sheetTitle = document.getElementById("sheetTitle");
+  var deleteBtn = document.getElementById("deleteBtn");
+  var withdrawBtn = document.getElementById("withdrawBtn");
+
+  function renderFormCategoryChips() {
+    var container = document.getElementById("formCategoryChips");
+    var html = "";
+    state.categories.forEach(function (cat) {
+      html += '<button type="button" class="chip' + (state.formCategoryId === cat.id ? " is-active" : "") + '" data-category="' + cat.id + '">' +
+        '<span class="dot" style="background:' + cat.color + '"></span>' + escapeHtml(cat.name) + '</button>';
+    });
+    container.innerHTML = html;
+  }
+
+  function renderFormSubCategoryChips() {
+    var label = document.getElementById("formSubCategoryLabel");
+    var container = document.getElementById("formSubCategoryChips");
+    var cat = getCategory(state.formCategoryId);
+    if (!cat || cat.subcategories.length === 0) {
+      label.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+    label.hidden = false;
+    var html = '<button type="button" class="chip' + (!state.formSubCategoryId ? " is-active" : "") + '" data-sub="">None</button>';
+    cat.subcategories.forEach(function (sub) {
+      html += '<button type="button" class="chip' + (state.formSubCategoryId === sub.id ? " is-active" : "") + '" data-sub="' + sub.id + '">' + escapeHtml(sub.name) + '</button>';
+    });
+    container.innerHTML = html;
+  }
+
+  document.getElementById("formCategoryChips").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip");
+    if (!btn) return;
+    state.formCategoryId = btn.dataset.category;
+    state.formSubCategoryId = null;
+    renderFormCategoryChips();
+    renderFormSubCategoryChips();
+  });
+
+  document.getElementById("formSubCategoryChips").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip");
+    if (!btn) return;
+    state.formSubCategoryId = btn.dataset.sub || null;
+    renderFormSubCategoryChips();
+  });
+
+  // ---------- batches within the item form ----------
+
+  function renderFormBatches() {
+    var container = document.getElementById("formBatchList");
+    var unit = document.getElementById("fieldUnit").value.trim();
+    var total = roundQty(state.formBatches.reduce(function (sum, b) { return sum + (Number(b.quantity) || 0); }, 0));
+    document.getElementById("formBatchesTotal").textContent = "Total: " + formatQty(total) + (unit ? " " + unit : "");
+
+    if (state.formBatches.length === 0) {
+      container.innerHTML = '<li class="batch-empty">No batches yet — add one below, or leave empty to track this as depleted and due for restock.</li>';
+      return;
+    }
+    var sorted = state.formBatches.slice().sort(sortByExpiryAscNullsLast);
+    container.innerHTML = sorted.map(function (b) {
+      var status = expiryStatus(b.expiry, b.expiryType);
+      var qtyText = formatQty(b.quantity) + (unit ? " " + unit : "");
+      return '<li class="batch-row" data-id="' + b.id + '">' +
+        '<span class="batch-qty">' + qtyText + '</span>' +
+        '<span class="batch-expiry ' + status.cls + '">' + status.label + '</span>' +
+        '<button type="button" class="icon-btn batch-edit" data-id="' + b.id + '" title="Edit">✎</button>' +
+        '<button type="button" class="icon-btn batch-delete" data-id="' + b.id + '" title="Remove">🗑</button>' +
+      '</li>';
+    }).join("");
+  }
+
+  document.getElementById("fieldUnit").addEventListener("input", renderFormBatches);
+
+  document.getElementById("formBatchList").addEventListener("click", function (e) {
+    var editBtn = e.target.closest(".batch-edit");
+    if (editBtn) { openBatchSheet(editBtn.dataset.id); return; }
+    var delBtn = e.target.closest(".batch-delete");
+    if (delBtn) {
+      if (!confirm("Remove this batch?")) return;
+      state.formBatches = state.formBatches.filter(function (b) { return b.id !== delBtn.dataset.id; });
+      renderFormBatches();
+    }
+  });
+
+  var batchSheet = document.getElementById("batchSheet");
+  var batchForm = document.getElementById("batchForm");
+  var batchQtyInput = document.getElementById("batchQty");
+
+  function openBatchSheet(batchId) {
+    state.editingBatchId = batchId || null;
+    var batch = batchId ? state.formBatches.find(function (b) { return b.id === batchId; }) : null;
+
+    document.getElementById("batchSheetTitle").textContent = batch ? "Edit batch" : "Add batch";
+    batchQtyInput.value = batch ? formatQty(batch.quantity) : "1";
+    document.getElementById("batchExpiry").value = batch ? (batch.expiry || "") : "";
+
+    var type = batch && batch.expiryType ? batch.expiryType : "use_by";
+    document.querySelectorAll("#batchExpiryTypeSegmented .segment").forEach(function (s) {
+      s.classList.toggle("is-active", s.dataset.type === type);
+    });
+
+    batchSheet.hidden = false;
+    batchQtyInput.focus();
+  }
+
+  function closeBatchSheet() {
+    batchSheet.hidden = true;
+    batchForm.reset();
+    state.editingBatchId = null;
+  }
+
+  document.getElementById("addBatchBtn").addEventListener("click", function () { openBatchSheet(null); });
+  document.getElementById("batchCancelBtn").addEventListener("click", closeBatchSheet);
+  batchSheet.addEventListener("click", function (e) { if (e.target === batchSheet) closeBatchSheet(); });
+
+  document.getElementById("batchExpiryTypeSegmented").addEventListener("click", function (e) {
+    var btn = e.target.closest(".segment");
+    if (!btn) return;
+    document.querySelectorAll("#batchExpiryTypeSegmented .segment").forEach(function (s) {
+      s.classList.toggle("is-active", s === btn);
+    });
+  });
+
+  batchForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var qty = roundQty(Number(batchQtyInput.value));
+    if (!qty || qty <= 0) return;
+    var expiry = document.getElementById("batchExpiry").value || null;
+    var activeSeg = document.querySelector("#batchExpiryTypeSegmented .segment.is-active");
+    var type = expiry ? (activeSeg ? activeSeg.dataset.type : "use_by") : null;
+
+    if (state.editingBatchId) {
+      var b = state.formBatches.find(function (x) { return x.id === state.editingBatchId; });
+      if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; }
+    } else {
+      state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type });
+    }
+    closeBatchSheet();
+    renderFormBatches();
+  });
+
+  // ---------- item form open/close/submit ----------
+
+  function openForm(id) {
+    state.editingId = id || null;
+    var item = id ? state.items.find(function (it) { return it.id === id; }) : null;
+
+    sheetTitle.textContent = item ? "Edit item" : "Add item";
+    deleteBtn.hidden = !item;
+    withdrawBtn.hidden = !item;
+
+    document.getElementById("fieldName").value = item ? item.name : "";
+    document.getElementById("fieldUnit").value = item ? (item.unit || "") : "";
+    document.getElementById("fieldLocation").value = item ? (item.location || "") : "";
+    document.getElementById("fieldNotes").value = item ? (item.notes || "") : "";
+
+    var defaultCatId = state.categories.length ? state.categories[0].id : null;
+    state.formCategoryId = item ? (getCategory(item.categoryId) ? item.categoryId : defaultCatId) : defaultCatId;
+    state.formSubCategoryId = item ? item.subcategoryId : null;
+    renderFormCategoryChips();
+    renderFormSubCategoryChips();
+
+    state.formBatches = item ? item.batches.map(function (b) { return Object.assign({}, b); }) : [];
+    renderFormBatches();
+
+    itemSheet.hidden = false;
+    document.getElementById("fieldName").focus();
+  }
+
+  function closeForm() {
+    itemSheet.hidden = true;
+    itemForm.reset();
+    state.editingId = null;
+    state.formBatches = [];
+  }
+
+  document.getElementById("fab").addEventListener("click", function () { openForm(null); });
+  document.getElementById("emptyAddBtn").addEventListener("click", function () { openForm(null); });
+  document.getElementById("cancelBtn").addEventListener("click", closeForm);
+  itemSheet.addEventListener("click", function (e) { if (e.target === itemSheet) closeForm(); });
+
+  itemForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = document.getElementById("fieldName").value.trim();
+    if (!name) return;
+
+    var data = {
+      name: name,
+      categoryId: state.formCategoryId,
+      subcategoryId: state.formSubCategoryId || null,
+      unit: document.getElementById("fieldUnit").value.trim(),
+      batches: state.formBatches.map(function (b) { return Object.assign({}, b); }),
+      location: document.getElementById("fieldLocation").value.trim(),
+      notes: document.getElementById("fieldNotes").value.trim(),
+      updatedAt: new Date().toISOString()
+    };
+
+    if (state.editingId) {
+      var idx = state.items.findIndex(function (it) { return it.id === state.editingId; });
+      if (idx !== -1) state.items[idx] = Object.assign({}, state.items[idx], data);
+    } else {
+      data.id = uid();
+      state.items.push(data);
+    }
+
+    saveItems();
+    closeForm();
+    render();
+  });
+
+  deleteBtn.addEventListener("click", function () {
+    if (!state.editingId) return;
+    if (!confirm("Delete this item? This can't be undone.")) return;
+    state.items = state.items.filter(function (it) { return it.id !== state.editingId; });
+    saveItems();
+    closeForm();
+    render();
+  });
+
+  // ---------- withdraw sheet ----------
+
+  var withdrawSheet = document.getElementById("withdrawSheet");
+  var withdrawForm = document.getElementById("withdrawForm");
+  var withdrawQtyInput = document.getElementById("withdrawQty");
+
+  withdrawBtn.addEventListener("click", function () {
+    var item = state.items.find(function (it) { return it.id === state.editingId; });
+    if (!item) return;
+    var total = itemTotalQty(item);
+    document.getElementById("withdrawItemName").textContent = item.name;
+    document.getElementById("withdrawStockLine").textContent =
+      "Currently have " + formatQty(total) + (item.unit ? " " + item.unit : "") + " in stock across " +
+      item.batches.length + " batch" + (item.batches.length === 1 ? "" : "es") + ".";
+    withdrawQtyInput.max = total;
+    withdrawQtyInput.value = Math.min(1, total) || 1;
+    document.getElementById("withdrawReason").value = "";
+    withdrawSheet.hidden = false;
+  });
+
+  function closeWithdrawSheet() {
+    withdrawSheet.hidden = true;
+    withdrawForm.reset();
+  }
+
+  document.getElementById("withdrawCancelBtn").addEventListener("click", closeWithdrawSheet);
+  withdrawSheet.addEventListener("click", function (e) { if (e.target === withdrawSheet) closeWithdrawSheet(); });
+
+  withdrawForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var item = state.items.find(function (it) { return it.id === state.editingId; });
+    if (!item) return;
+
+    var total = itemTotalQty(item);
+    var amount = roundQty(Number(withdrawQtyInput.value));
+    if (!amount || amount <= 0) return;
+    if (amount > total) amount = total;
+
+    var reason = document.getElementById("withdrawReason").value.trim();
+
+    // FIFO: deduct from the soonest-expiring batches first.
+    var sorted = item.batches.slice().sort(sortByExpiryAscNullsLast);
+    var remaining = amount;
+    sorted.forEach(function (b) {
+      if (remaining <= 0) return;
+      var take = Math.min(b.quantity, remaining);
+      b.quantity = roundQty(b.quantity - take);
+      remaining = roundQty(remaining - take);
+    });
+    item.batches = item.batches.filter(function (b) { return b.quantity > 0; });
+    item.updatedAt = new Date().toISOString();
+
+    state.history.unshift({
+      id: uid(),
+      itemId: item.id,
+      name: item.name,
+      categoryId: item.categoryId,
+      unit: item.unit,
+      amount: amount,
+      reason: reason,
+      remainingAfter: itemTotalQty(item),
+      date: new Date().toISOString()
+    });
+    saveHistory();
+    saveItems();
+
+    closeWithdrawSheet();
+    closeForm();
+    render();
+  });
+
+  // ---------- history sheet ----------
+
+  var historySheet = document.getElementById("historySheet");
+  var historyList = document.getElementById("historyList");
+  var historyEmpty = document.getElementById("historyEmpty");
+
+  function visibleHistory() {
+    return state.history.filter(function (h) {
+      if (state.historyCategory !== "all") {
+        var effCat = getCategory(h.categoryId) ? h.categoryId : null;
+        if (state.historyCategory === "uncategorized") {
+          if (effCat !== null) return false;
+        } else if (effCat !== state.historyCategory) {
+          return false;
+        }
+      }
+      if (state.historySearch) {
+        var q = state.historySearch.toLowerCase();
+        var when = new Date(h.date).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+        var hay = (h.name + " " + (h.reason || "") + " " + categoryName(h.categoryId) + " " + when).toLowerCase();
+        if (hay.indexOf(q) === -1) return false;
+      }
+      return true;
+    });
+  }
+
+  function renderHistoryFilters() {
+    var container = document.getElementById("historyCategoryChips");
+    var hasUncategorized = state.history.some(function (h) { return !getCategory(h.categoryId); });
+    var html = '<button class="chip' + (state.historyCategory === "all" ? " is-active" : "") + '" data-category="all">All</button>';
+    state.categories.forEach(function (cat) {
+      html += '<button class="chip' + (state.historyCategory === cat.id ? " is-active" : "") + '" data-category="' + cat.id + '">' +
+        '<span class="dot" style="background:' + cat.color + '"></span>' + escapeHtml(cat.name) + '</button>';
+    });
+    if (hasUncategorized) {
+      html += '<button class="chip' + (state.historyCategory === "uncategorized" ? " is-active" : "") + '" data-category="uncategorized">' +
+        '<span class="dot"></span>Uncategorized</button>';
+    }
+    container.innerHTML = html;
+  }
+
+  document.getElementById("historyCategoryChips").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip");
+    if (!btn) return;
+    state.historyCategory = btn.dataset.category;
+    renderHistory();
+  });
+
+  document.getElementById("historySearchInput").addEventListener("input", function (e) {
+    state.historySearch = e.target.value.trim();
+    renderHistory();
+  });
+
+  function renderHistory() {
+    renderHistoryFilters();
+    var entries = visibleHistory();
+    historyList.innerHTML = "";
+
+    if (entries.length === 0) {
+      historyEmpty.hidden = false;
+      historyList.hidden = true;
+      historyEmpty.textContent = state.history.length === 0 ? "No withdrawals recorded yet." : "Nothing matches this search.";
+      return;
+    }
+    historyEmpty.hidden = true;
+    historyList.hidden = false;
+
+    entries.forEach(function (entry) {
+      var li = document.createElement("li");
+      li.className = "item-row";
+      var when = new Date(entry.date).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+      li.innerHTML =
+        '<span class="dot item-cat-dot" style="background:' + colorFor(entry.categoryId) + '"></span>' +
+        '<div class="item-main">' +
+          '<p class="item-name"></p>' +
+          '<p class="item-sub"></p>' +
+        '</div>' +
+        '<div class="item-meta"><span class="item-qty"></span></div>';
+      li.querySelector(".item-name").textContent = entry.name;
+      li.querySelector(".item-sub").textContent = when + (entry.reason ? " · " + entry.reason : "");
+      li.querySelector(".item-qty").textContent = "-" + formatQty(entry.amount) + (entry.unit ? " " + entry.unit : "");
+      historyList.appendChild(li);
+    });
+  }
+
+  document.getElementById("historyBtn").addEventListener("click", function () {
+    settingsSheet.hidden = true;
+    renderHistory();
+    historySheet.hidden = false;
+  });
+  document.getElementById("historyCloseBtn").addEventListener("click", function () { historySheet.hidden = true; });
+  historySheet.addEventListener("click", function (e) { if (e.target === historySheet) historySheet.hidden = true; });
+
+  // ---------- manage categories sheet ----------
+
+  var categoriesSheet = document.getElementById("categoriesSheet");
+  var categoryManageList = document.getElementById("categoryManageList");
+
+  function renderSwatchRow() {
+    var container = document.getElementById("swatchRow");
+    container.innerHTML = SWATCHES.map(function (color) {
+      return '<button type="button" class="swatch' + (state.newCategoryColor === color ? " is-active" : "") + '" style="background:' + color + '" data-color="' + color + '"></button>';
+    }).join("");
+  }
+
+  document.getElementById("swatchRow").addEventListener("click", function (e) {
+    var btn = e.target.closest(".swatch");
+    if (!btn) return;
+    state.newCategoryColor = btn.dataset.color;
+    renderSwatchRow();
+  });
+
+  function renderCategoryManageList() {
+    var html = "";
+    state.categories.forEach(function (cat) {
+      var count = state.items.filter(function (it) { return it.categoryId === cat.id; }).length;
+      var expanded = !!state.expandedCategoryIds[cat.id];
+      html += '<li class="category-row" data-id="' + cat.id + '">' +
+        '<div class="category-row-main">' +
+          '<span class="dot" style="background:' + cat.color + '"></span>' +
+          '<span class="category-name">' + escapeHtml(cat.name) + '</span>' +
+          '<span class="category-count">' + count + ' item' + (count === 1 ? "" : "s") + '</span>' +
+          '<button type="button" class="icon-btn cat-rename" data-id="' + cat.id + '" title="Rename">✎</button>' +
+          '<button type="button" class="icon-btn cat-delete" data-id="' + cat.id + '" title="Delete">🗑</button>' +
+          '<button type="button" class="icon-btn cat-expand" data-id="' + cat.id + '" title="Subcategories">' + (expanded ? "▾" : "▸") + '</button>' +
+        '</div>' +
+        '<ul class="subcategory-list" data-parent="' + cat.id + '"' + (expanded ? "" : " hidden") + '>' +
+          cat.subcategories.map(function (sub) {
+            return '<li class="subcategory-row" data-id="' + sub.id + '">' +
+              '<span class="subcategory-name">' + escapeHtml(sub.name) + '</span>' +
+              '<button type="button" class="icon-btn sub-rename" data-parent="' + cat.id + '" data-id="' + sub.id + '" title="Rename">✎</button>' +
+              '<button type="button" class="icon-btn sub-delete" data-parent="' + cat.id + '" data-id="' + sub.id + '" title="Delete">🗑</button>' +
+            '</li>';
+          }).join("") +
+          '<li class="add-sub-row-li"><div class="add-sub-row">' +
+            '<input type="text" class="new-sub-input" data-parent="' + cat.id + '" placeholder="New subcategory" maxlength="30">' +
+            '<button type="button" class="btn-secondary add-sub-btn" data-parent="' + cat.id + '">Add</button>' +
+          '</div></li>' +
+        '</ul>' +
+      '</li>';
+    });
+    categoryManageList.innerHTML = html;
+  }
+
+  categoryManageList.addEventListener("click", function (e) {
+    var expandBtn = e.target.closest(".cat-expand");
+    if (expandBtn) {
+      var id = expandBtn.dataset.id;
+      state.expandedCategoryIds[id] = !state.expandedCategoryIds[id];
+      renderCategoryManageList();
+      return;
+    }
+    var renameBtn = e.target.closest(".cat-rename");
+    if (renameBtn) {
+      var cat = getCategory(renameBtn.dataset.id);
+      if (!cat) return;
+      var name = prompt("Rename category", cat.name);
+      if (name && name.trim()) { cat.name = name.trim(); saveCategories(); renderCategoryManageList(); render(); }
+      return;
+    }
+    var delBtn = e.target.closest(".cat-delete");
+    if (delBtn) {
+      var id2 = delBtn.dataset.id;
+      var cat2 = getCategory(id2);
+      if (!cat2) return;
+      var count = state.items.filter(function (it) { return it.categoryId === id2; }).length;
+      var msg = count > 0
+        ? ('Delete "' + cat2.name + '"? ' + count + " item(s) will become Uncategorized.")
+        : ('Delete "' + cat2.name + '"?');
+      if (!confirm(msg)) return;
+      state.items.forEach(function (it) { if (it.categoryId === id2) { it.categoryId = null; it.subcategoryId = null; } });
+      state.categories = state.categories.filter(function (c) { return c.id !== id2; });
+      if (state.activeCategory === id2) { state.activeCategory = "all"; state.activeSubCategory = "all"; }
+      saveItems(); saveCategories();
+      renderCategoryManageList(); render();
+      return;
+    }
+    var subRename = e.target.closest(".sub-rename");
+    if (subRename) {
+      var sub = getSubcategory(subRename.dataset.parent, subRename.dataset.id);
+      if (!sub) return;
+      var sname = prompt("Rename subcategory", sub.name);
+      if (sname && sname.trim()) { sub.name = sname.trim(); saveCategories(); renderCategoryManageList(); render(); }
+      return;
+    }
+    var subDelete = e.target.closest(".sub-delete");
+    if (subDelete) {
+      var pid = subDelete.dataset.parent, sid = subDelete.dataset.id;
+      var pcat = getCategory(pid);
+      if (!pcat) return;
+      if (!confirm("Delete this subcategory? Items using it will keep their main category.")) return;
+      pcat.subcategories = pcat.subcategories.filter(function (s) { return s.id !== sid; });
+      state.items.forEach(function (it) { if (it.categoryId === pid && it.subcategoryId === sid) it.subcategoryId = null; });
+      saveItems(); saveCategories();
+      renderCategoryManageList(); render();
+      return;
+    }
+    var addSubBtn = e.target.closest(".add-sub-btn");
+    if (addSubBtn) {
+      var pid3 = addSubBtn.dataset.parent;
+      var input = categoryManageList.querySelector('.new-sub-input[data-parent="' + pid3 + '"]');
+      var newName = input.value.trim();
+      if (!newName) return;
+      var pcat3 = getCategory(pid3);
+      pcat3.subcategories.push({ id: uid(), name: newName });
+      input.value = "";
+      saveCategories();
+      state.expandedCategoryIds[pid3] = true;
+      renderCategoryManageList(); render();
+      return;
+    }
+  });
+
+  categoryManageList.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && e.target.classList.contains("new-sub-input")) {
+      e.preventDefault();
+      var btn = categoryManageList.querySelector('.add-sub-btn[data-parent="' + e.target.dataset.parent + '"]');
+      if (btn) btn.click();
+    }
+  });
+
+  document.getElementById("addCategoryBtn").addEventListener("click", function () {
+    var input = document.getElementById("newCategoryName");
+    var name = input.value.trim();
+    if (!name) return;
+    state.categories.push({ id: uid(), name: name, color: state.newCategoryColor || SWATCHES[0], subcategories: [] });
+    input.value = "";
+    saveCategories();
+    renderCategoryManageList();
+    render();
+  });
+
+  document.getElementById("manageCategoriesBtn").addEventListener("click", function () {
+    settingsSheet.hidden = true;
+    state.newCategoryColor = SWATCHES[0];
+    renderSwatchRow();
+    renderCategoryManageList();
+    categoriesSheet.hidden = false;
+  });
+  document.getElementById("categoriesCloseBtn").addEventListener("click", function () { categoriesSheet.hidden = true; });
+  categoriesSheet.addEventListener("click", function (e) { if (e.target === categoriesSheet) categoriesSheet.hidden = true; });
+
+  // ---------- thresholds sheet ----------
+
+  var thresholdsSheet = document.getElementById("thresholdsSheet");
+  var thresholdsForm = document.getElementById("thresholdsForm");
+
+  document.getElementById("adjustThresholdsBtn").addEventListener("click", function () {
+    settingsSheet.hidden = true;
+    document.getElementById("settingSoonDays").value = state.settings.soonDays;
+    document.getElementById("settingUrgentDays").value = state.settings.urgentDays;
+    document.getElementById("settingDepletionThreshold").value = state.settings.depletionThreshold;
+    thresholdsSheet.hidden = false;
+  });
+  document.getElementById("thresholdsCancelBtn").addEventListener("click", function () { thresholdsSheet.hidden = true; });
+  thresholdsSheet.addEventListener("click", function (e) { if (e.target === thresholdsSheet) thresholdsSheet.hidden = true; });
+
+  thresholdsForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var soonDays = Math.max(1, Number(document.getElementById("settingSoonDays").value) || 30);
+    var urgentDays = Math.max(0, Number(document.getElementById("settingUrgentDays").value) || 0);
+    var depletionThreshold = roundQty(Math.max(0, Number(document.getElementById("settingDepletionThreshold").value) || 0));
+    if (urgentDays > soonDays) urgentDays = soonDays;
+
+    state.settings = { soonDays: soonDays, urgentDays: urgentDays, depletionThreshold: depletionThreshold };
+    saveSettings();
+    thresholdsSheet.hidden = true;
+    render();
+  });
+
+  // ---------- stats sheet ----------
+
+  var statsSheet = document.getElementById("statsSheet");
+  var statsList = document.getElementById("statsList");
+
+  function renderStats() {
+    var totalQuantity = state.items.reduce(function (sum, it) { return sum + itemTotalQty(it); }, 0);
+    var expiringSoon = state.items.filter(isSoon).length;
+    var expired = state.items.filter(function (it) {
+      return it.batches.some(function (b) {
+        var d = daysUntil(b.expiry);
+        return d !== null && d < 0;
+      });
+    }).length;
+    var depleted = state.items.filter(isDepleted).length;
+    var totalWithdrawn = state.history.reduce(function (sum, h) { return sum + (Number(h.amount) || 0); }, 0);
+    var subCount = state.categories.reduce(function (sum, c) { return sum + c.subcategories.length; }, 0);
+
+    var bytes = (localStorage.getItem(STORAGE_KEY) || "").length +
+      (localStorage.getItem(HISTORY_KEY) || "").length +
+      (localStorage.getItem(CATEGORIES_KEY) || "").length;
+    var kb = (bytes / 1024).toFixed(1);
+
+    var rows = [
+      ["Items tracked", state.items.length],
+      ["Total units in stock", formatQty(totalQuantity)],
+      ["Categories", state.categories.length + (subCount ? " (" + subCount + " subcategories)" : "")],
+      ["Expiring within " + state.settings.soonDays + " days", expiringSoon],
+      ["Already past date", expired],
+      ["Depleted (≤ " + formatQty(state.settings.depletionThreshold) + ")", depleted],
+      ["Withdrawals logged", state.history.length],
+      ["Units withdrawn all-time", formatQty(totalWithdrawn)],
+      ["Storage used", kb + " KB"]
+    ];
+
+    var html = rows.map(function (r) {
+      return '<li class="stat-row"><span class="stat-label">' + escapeHtml(r[0]) + '</span><span class="stat-value">' + escapeHtml(String(r[1])) + '</span></li>';
+    }).join("");
+
+    if (state.categories.length) {
+      html += '<li class="stat-section-label">By category</li>';
+      html += state.categories.map(function (cat) {
+        var count = state.items.filter(function (it) { return it.categoryId === cat.id; }).length;
+        return '<li class="stat-row"><span class="stat-label"><span class="dot" style="background:' + cat.color + '"></span>' + escapeHtml(cat.name) + '</span><span class="stat-value">' + count + '</span></li>';
+      }).join("");
+      var uncategorizedCount = state.items.filter(function (it) { return !getCategory(it.categoryId); }).length;
+      if (uncategorizedCount > 0) {
+        html += '<li class="stat-row"><span class="stat-label"><span class="dot"></span>Uncategorized</span><span class="stat-value">' + uncategorizedCount + '</span></li>';
+      }
+    }
+
+    statsList.innerHTML = html;
+  }
+
+  document.getElementById("statsBtn").addEventListener("click", function () {
+    settingsSheet.hidden = true;
+    renderStats();
+    statsSheet.hidden = false;
+  });
+  document.getElementById("statsCloseBtn").addEventListener("click", function () { statsSheet.hidden = true; });
+  statsSheet.addEventListener("click", function (e) { if (e.target === statsSheet) statsSheet.hidden = true; });
+
+  // ---------- settings sheet ----------
+
+  var settingsSheet = document.getElementById("settingsSheet");
+  document.getElementById("settingsBtn").addEventListener("click", function () { settingsSheet.hidden = false; });
+  document.getElementById("settingsCloseBtn").addEventListener("click", function () { settingsSheet.hidden = true; });
+  settingsSheet.addEventListener("click", function (e) { if (e.target === settingsSheet) settingsSheet.hidden = true; });
+
+  document.getElementById("exportBtn").addEventListener("click", function () {
+    var backup = { items: state.items, history: state.history, categories: state.categories, settings: state.settings };
+    var blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "depot-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  var importOptionsSheet = document.getElementById("importOptionsSheet");
+  var importOptionsForm = document.getElementById("importOptionsForm");
+
+  document.getElementById("importItemsSegmented").addEventListener("click", function (e) {
+    var btn = e.target.closest(".segment");
+    if (!btn) return;
+    this.querySelectorAll(".segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
+  });
+  document.getElementById("importHistorySegmented").addEventListener("click", function (e) {
+    var btn = e.target.closest(".segment");
+    if (!btn) return;
+    this.querySelectorAll(".segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
+  });
+
+  document.getElementById("importInput").addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var parsed = JSON.parse(reader.result);
+        var importedItems = Array.isArray(parsed) ? parsed : parsed.items;
+        var importedHistory = Array.isArray(parsed) ? [] : (parsed.history || []);
+        var importedCategories = Array.isArray(parsed) ? null : (parsed.categories || null);
+        var importedSettings = Array.isArray(parsed) ? null : (parsed.settings || null);
+        if (!Array.isArray(importedItems)) throw new Error("File is not a valid backup");
+
+        state.pendingImport = {
+          items: importedItems,
+          history: importedHistory,
+          categories: importedCategories,
+          settings: importedSettings
+        };
+
+        document.getElementById("importSummaryLine").textContent =
+          "This backup has " + importedItems.length + " item(s) and " + importedHistory.length +
+          " withdrawal record(s). You currently have " + state.items.length + " item(s) and " +
+          state.history.length + " record(s) on this device.";
+
+        document.querySelectorAll("#importItemsSegmented .segment").forEach(function (s) {
+          s.classList.toggle("is-active", s.dataset.mode === "merge");
+        });
+        document.querySelectorAll("#importHistorySegmented .segment").forEach(function (s) {
+          s.classList.toggle("is-active", s.dataset.mode === "merge");
+        });
+
+        settingsSheet.hidden = true;
+        importOptionsSheet.hidden = false;
+      } catch (err) {
+        alert("Could not read that file: " + err.message);
+      }
+      e.target.value = "";
+    };
+    reader.readAsText(file);
+  });
+
+  function closeImportOptions() {
+    state.pendingImport = null;
+    importOptionsSheet.hidden = true;
+  }
+  document.getElementById("importCancelBtn").addEventListener("click", closeImportOptions);
+  importOptionsSheet.addEventListener("click", function (e) { if (e.target === importOptionsSheet) closeImportOptions(); });
+
+  importOptionsForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (!state.pendingImport) return;
+
+    var itemsMode = document.querySelector("#importItemsSegmented .segment.is-active").dataset.mode;
+    var historyMode = document.querySelector("#importHistorySegmented .segment.is-active").dataset.mode;
+
+    state.items = itemsMode === "replace"
+      ? state.pendingImport.items
+      : mergeById(state.items, state.pendingImport.items);
+
+    state.history = historyMode === "replace"
+      ? state.pendingImport.history
+      : mergeById(state.history, state.pendingImport.history);
+
+    if (state.pendingImport.categories) {
+      state.pendingImport.categories.forEach(function (ic) {
+        if (!getCategory(ic.id)) state.categories.push(ic);
+      });
+    }
+    if (state.pendingImport.settings) state.settings = state.pendingImport.settings;
+
+    migrateItems(state.items);
+    saveItems();
+    saveHistory();
+    saveCategories();
+    saveSettings();
+
+    state.pendingImport = null;
+    importOptionsSheet.hidden = true;
+    render();
+  });
+
+  document.getElementById("clearAllBtn").addEventListener("click", function () {
+    if (!confirm("Delete every item in Depot? This can't be undone.")) return;
+    state.items = [];
+    saveItems();
+    render();
+    settingsSheet.hidden = true;
+  });
+
+  // ---------- offline support ----------
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js").catch(function (err) {
+        console.warn("Service worker registration failed", err);
+      });
+    });
+  }
+
+  render();
+})();

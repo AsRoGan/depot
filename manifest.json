@@ -1,0 +1,11 @@
+{
+  "name": "Depot",
+  "short_name": "Depot",
+  "description": "Track food, medical, and device supplies — fully offline.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#F2F1ED",
+  "theme_color": "#F2F1ED",
+  "orientation": "portrait-primary",
+  "icons": []
+}

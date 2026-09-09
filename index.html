@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F2F1ED">
+<title>Depot</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>Depot</h1>
+  <button id="settingsBtn" class="icon-btn" aria-label="Settings" title="Settings">⋯</button>
+</header>
+
+<div class="controls">
+  <input id="searchInput" class="search-input" type="text" placeholder="Search your stores" aria-label="Search">
+  <div class="chips" id="categoryChips"></div>
+  <div class="chips" id="subCategoryChips" hidden></div>
+  <label class="soon-toggle">
+    <input type="checkbox" id="soonToggle">
+    Expiring soon only
+  </label>
+  <label class="soon-toggle">
+    <input type="checkbox" id="depletedToggle">
+    Depleted only
+  </label>
+</div>
+
+<main id="listContainer">
+  <ul id="itemList" class="item-list"></ul>
+  <div id="emptyState" class="empty-state" hidden>
+    <p id="emptyStateText">Nothing stored yet.</p>
+    <button id="emptyAddBtn" class="btn-primary">Add the first item</button>
+  </div>
+</main>
+
+<button id="fab" class="fab" aria-label="Add item" title="Add item">+</button>
+
+<!-- Item add/edit sheet -->
+<div id="itemSheet" class="sheet-backdrop" hidden>
+  <form id="itemForm" class="sheet">
+    <div class="sheet-handle"></div>
+    <h2 id="sheetTitle">Add item</h2>
+
+    <label>Name
+      <input type="text" id="fieldName" required maxlength="80">
+    </label>
+
+    <label>Category
+      <div class="chips" id="formCategoryChips"></div>
+    </label>
+
+    <label id="formSubCategoryLabel" hidden>Subcategory
+      <div class="chips" id="formSubCategoryChips"></div>
+    </label>
+
+    <label>Unit <span class="hint">(optional)</span>
+      <input type="text" id="fieldUnit" placeholder="e.g. cans, boxes">
+    </label>
+
+    <div class="batches-section">
+      <div class="batches-header">
+        <span>Batches</span>
+        <span class="batches-total" id="formBatchesTotal">Total: 0</span>
+      </div>
+      <ul id="formBatchList" class="batch-list"></ul>
+      <button type="button" id="addBatchBtn" class="btn-secondary">Add batch</button>
+    </div>
+
+    <label>Location <span class="hint">(optional)</span>
+      <input type="text" id="fieldLocation" placeholder="e.g. Garage shelf 2" maxlength="60">
+    </label>
+
+    <label>Notes <span class="hint">(optional)</span>
+      <textarea id="fieldNotes" rows="2" maxlength="300"></textarea>
+    </label>
+
+    <div class="sheet-actions">
+      <button type="button" id="deleteBtn" class="btn-danger" hidden>Delete</button>
+      <button type="button" id="withdrawBtn" class="btn-secondary" hidden>Withdraw</button>
+      <button type="button" id="cancelBtn" class="btn-ghost">Cancel</button>
+      <button type="submit" class="btn-primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<!-- Batch add/edit sheet -->
+<div id="batchSheet" class="sheet-backdrop" hidden>
+  <form id="batchForm" class="sheet">
+    <div class="sheet-handle"></div>
+    <h2 id="batchSheetTitle">Add batch</h2>
+
+    <label>Quantity
+      <input type="number" id="batchQty" min="0.01" step="0.01" required inputmode="decimal">
+    </label>
+
+    <label>Expiry date <span class="hint">(optional)</span>
+      <input type="date" id="batchExpiry">
+    </label>
+
+    <div class="segmented" id="batchExpiryTypeSegmented">
+      <button type="button" class="segment is-active" data-type="use_by">Use by</button>
+      <button type="button" class="segment" data-type="best_before">Best before</button>
+    </div>
+
+    <div class="sheet-actions">
+      <button type="button" id="batchCancelBtn" class="btn-ghost">Cancel</button>
+      <button type="submit" class="btn-primary">Save batch</button>
+    </div>
+  </form>
+</div>
+
+<!-- Withdraw sheet -->
+<div id="withdrawSheet" class="sheet-backdrop" hidden>
+  <form id="withdrawForm" class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Withdraw <span id="withdrawItemName"></span></h2>
+    <p class="settings-desc" id="withdrawStockLine"></p>
+
+    <label>Quantity to withdraw
+      <input type="number" id="withdrawQty" min="0.01" step="0.01" required inputmode="decimal">
+    </label>
+
+    <label>Reason <span class="hint">(optional)</span>
+      <input type="text" id="withdrawReason" placeholder="e.g. used in dinner, expired, broke, gave away" maxlength="120">
+    </label>
+
+    <div class="sheet-actions">
+      <button type="button" id="withdrawCancelBtn" class="btn-ghost">Cancel</button>
+      <button type="submit" class="btn-primary">Confirm withdrawal</button>
+    </div>
+  </form>
+</div>
+
+<!-- History sheet -->
+<div id="historySheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Withdrawal history</h2>
+    <input id="historySearchInput" class="search-input" type="text" placeholder="Search withdrawals (item, date, reason, category)">
+    <div class="chips" id="historyCategoryChips"></div>
+    <ul id="historyList" class="item-list"></ul>
+    <p id="historyEmpty" class="settings-desc" hidden>No withdrawals recorded yet.</p>
+    <button id="historyCloseBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
+<!-- Manage categories sheet -->
+<div id="categoriesSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Manage categories</h2>
+    <p class="settings-desc">Group items however makes sense to you. Each category can have subcategories underneath it.</p>
+
+    <ul id="categoryManageList" class="category-manage-list"></ul>
+
+    <div class="add-category-form">
+      <input type="text" id="newCategoryName" placeholder="New category name" maxlength="30">
+      <div class="swatch-row" id="swatchRow"></div>
+      <button type="button" id="addCategoryBtn" class="btn-secondary">Add category</button>
+    </div>
+
+    <button id="categoriesCloseBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
+<!-- Thresholds sheet -->
+<div id="thresholdsSheet" class="sheet-backdrop" hidden>
+  <form id="thresholdsForm" class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Thresholds</h2>
+    <p class="settings-desc">These control when items are flagged as expiring, urgent, or depleted, across the whole app.</p>
+
+    <label>Expiring soon window <span class="hint">(days)</span>
+      <input type="number" id="settingSoonDays" min="1" step="1" required inputmode="numeric">
+    </label>
+
+    <label>Urgent window <span class="hint">(days, within the soon window)</span>
+      <input type="number" id="settingUrgentDays" min="0" step="1" required inputmode="numeric">
+    </label>
+
+    <label>Depletion threshold <span class="hint">(flag as depleted at or below this many units)</span>
+      <input type="number" id="settingDepletionThreshold" min="0" step="0.01" required inputmode="decimal">
+    </label>
+
+    <div class="sheet-actions">
+      <button type="button" id="thresholdsCancelBtn" class="btn-ghost">Cancel</button>
+      <button type="submit" class="btn-primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<!-- Import options sheet -->
+<div id="importOptionsSheet" class="sheet-backdrop" hidden>
+  <form id="importOptionsForm" class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Import backup</h2>
+    <p class="settings-desc" id="importSummaryLine"></p>
+
+    <label>Items
+      <div class="segmented" id="importItemsSegmented">
+        <button type="button" class="segment is-active" data-mode="merge">Merge</button>
+        <button type="button" class="segment" data-mode="replace">Replace</button>
+      </div>
+    </label>
+
+    <label>Withdrawal history
+      <div class="segmented" id="importHistorySegmented">
+        <button type="button" class="segment is-active" data-mode="merge">Merge</button>
+        <button type="button" class="segment" data-mode="replace">Replace</button>
+      </div>
+    </label>
+
+    <div class="sheet-actions">
+      <button type="button" id="importCancelBtn" class="btn-ghost">Cancel</button>
+      <button type="submit" class="btn-primary">Import</button>
+    </div>
+  </form>
+</div>
+
+<!-- Settings sheet -->
+<div id="settingsSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Settings</h2>
+    <p class="settings-desc">Everything is stored only on this device. Back up your list before reinstalling or switching devices.</p>
+    <div class="settings-actions">
+      <button id="manageCategoriesBtn" class="btn-secondary">Manage categories</button>
+      <button id="adjustThresholdsBtn" class="btn-secondary">Adjust thresholds</button>
+      <button id="statsBtn" class="btn-secondary">View stats</button>
+      <button id="historyBtn" class="btn-secondary">View withdrawal history</button>
+      <button id="exportBtn" class="btn-secondary">Export backup (JSON)</button>
+      <label class="btn-secondary file-btn">
+        Import backup (JSON)
+        <input type="file" id="importInput" accept="application/json" hidden>
+      </label>
+      <button id="clearAllBtn" class="btn-danger">Delete all items</button>
+    </div>
+    <button id="settingsCloseBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
+<!-- Stats sheet -->
+<div id="statsSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Stats</h2>
+    <ul id="statsList" class="stat-list"></ul>
+    <button id="statsCloseBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
