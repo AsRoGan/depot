@@ -57,7 +57,10 @@
 
     <div class="photo-gallery" id="viewPhotoGallery"></div>
     <div class="photo-thumbs" id="viewPhotoThumbs"></div>
-    <label class="btn-secondary file-btn">Add photo<input type="file" id="viewAddPhotoInput" accept="image/*" hidden></label>
+    <div class="photo-add-row">
+      <label class="btn-secondary file-btn">Take photo<input type="file" id="viewTakePhotoInput" accept="image/*" capture="environment" hidden></label>
+      <label class="btn-secondary file-btn">Choose from gallery<input type="file" id="viewAddPhotoInput" accept="image/*" hidden></label>
+    </div>
 
     <ul id="viewBatchList" class="batch-list"></ul>
     <button type="button" id="viewAddBatchBtn" class="btn-secondary">Add batch</button>
@@ -371,7 +374,10 @@
       <div id="auditPhotoUpdatePanel" hidden>
         <p class="settings-desc" id="auditPhotoUpdateCount">Photos to save: 0</p>
         <div class="photo-thumbs" id="auditPhotoUpdateThumbs"></div>
-        <label class="btn-secondary file-btn">Add photo<input type="file" id="auditAddPhotoInput" accept="image/*" hidden></label>
+        <div class="photo-add-row">
+          <label class="btn-secondary file-btn">Take photo<input type="file" id="auditTakePhotoInput" accept="image/*" capture="environment" hidden></label>
+          <label class="btn-secondary file-btn">Choose from gallery<input type="file" id="auditAddPhotoInput" accept="image/*" hidden></label>
+        </div>
         <div class="sheet-actions">
           <button type="button" id="auditPhotoCancelBtn" class="btn-ghost">Cancel</button>
           <button type="button" id="auditPhotoSaveBtn" class="btn-primary">Save (replaces all existing photos)</button>

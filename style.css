@@ -281,6 +281,8 @@ body {
 .photo-thumb .photo-delete { top: 2px; right: 2px; }
 
 .file-btn { display: inline-block; text-align: center; cursor: pointer; }
+.photo-add-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.photo-add-row .file-btn { flex: 1; }
 
 .sheet-backdrop {
   position: fixed;

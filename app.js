@@ -810,9 +810,7 @@
     });
   }
 
-  document.getElementById("viewAddPhotoInput").addEventListener("change", function (e) {
-    var file = e.target.files[0];
-    e.target.value = "";
+  function handleViewPhotoFile(file) {
     if (!file) return;
     var item = state.items.find(function (it) { return it.id === state.viewingId; });
     if (!item) return;
@@ -826,6 +824,13 @@
         renderItemPhotos(item);
       });
     }).catch(function (err) { alert("Couldn't process that photo: " + err.message); });
+  }
+
+  document.getElementById("viewTakePhotoInput").addEventListener("change", function (e) {
+    var file = e.target.files[0]; e.target.value = ""; handleViewPhotoFile(file);
+  });
+  document.getElementById("viewAddPhotoInput").addEventListener("change", function (e) {
+    var file = e.target.files[0]; e.target.value = ""; handleViewPhotoFile(file);
   });
 
   document.getElementById("viewPhotoThumbs").addEventListener("click", function (e) {
@@ -1932,15 +1937,20 @@
     document.getElementById("auditPhotoUpdatePanel").hidden = false;
   });
 
-  document.getElementById("auditAddPhotoInput").addEventListener("change", function (e) {
-    var file = e.target.files[0];
-    e.target.value = "";
+  function handleAuditPhotoFile(file) {
     if (!file) return;
     compressImageFile(file, 1600, 0.75).then(function (blob) {
       state.auditPhotoDraft.push(blob);
       state.auditPhotoDraftUrls.push(URL.createObjectURL(blob));
       renderAuditPhotoDraft();
     }).catch(function (err) { alert("Couldn't process that photo: " + err.message); });
+  }
+
+  document.getElementById("auditTakePhotoInput").addEventListener("change", function (e) {
+    var file = e.target.files[0]; e.target.value = ""; handleAuditPhotoFile(file);
+  });
+  document.getElementById("auditAddPhotoInput").addEventListener("change", function (e) {
+    var file = e.target.files[0]; e.target.value = ""; handleAuditPhotoFile(file);
   });
 
   document.getElementById("auditPhotoUpdateThumbs").addEventListener("click", function (e) {
