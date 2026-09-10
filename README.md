@@ -255,3 +255,13 @@ by category with the reason each item was included. **Copy** puts a plain-text
 version on the clipboard; **Share** uses the device's native share sheet
 (texting it, emailing it, dropping it in a notes app) where supported, and
 falls back to clipboard copy elsewhere.
+
+## Barcode scanning
+
+Tap the camera icon in the top bar to scan. Uses Chrome's built-in
+`BarcodeDetector` — no external library, fully offline, Android/Chrome only
+(not supported in Safari). On a match it offers **Add batch** or **Withdraw**
+for that item; on no match, **Create new item** (barcode pre-filled) or
+**Attach to existing item**. The camera icon next to the Barcode field in the
+item form scans straight into that field instead, for when you're just
+tagging an item you're already editing.

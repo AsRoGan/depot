@@ -260,6 +260,16 @@ body {
 .field-row { display: flex; gap: 12px; }
 .field-row label { flex: 1; }
 
+.input-with-button { display: flex; gap: 8px; }
+.input-with-button input { flex: 1; }
+
+.scan-video {
+  width: 100%;
+  border-radius: 10px;
+  background: #000;
+  display: block;
+}
+
 .batches-section { display: flex; flex-direction: column; gap: 8px; }
 .batches-header {
   display: flex;

@@ -33,7 +33,8 @@
     historyCategory: "all",
     pendingImport: null,
     auditLocation: null,
-    auditChecked: {}
+    auditChecked: {},
+    scanContext: "global"
   };
 
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -1606,6 +1607,142 @@
 
   document.getElementById("shoppingListCloseBtn").addEventListener("click", function () { shoppingListSheet.hidden = true; });
   shoppingListSheet.addEventListener("click", function (e) { if (e.target === shoppingListSheet) shoppingListSheet.hidden = true; });
+
+  // ---------- barcode scanning ----------
+
+  var scanSheet = document.getElementById("scanSheet");
+  var scanStream = null;
+  var scanRAF = null;
+  var barcodeDetector = null;
+
+  function supportsBarcodeDetector() { return "BarcodeDetector" in window; }
+
+  function showScanUnsupported(message) {
+    document.getElementById("scanCameraWrap").hidden = true;
+    var el = document.getElementById("scanUnsupported");
+    el.hidden = false;
+    el.textContent = message;
+  }
+
+  function startScanCamera() {
+    document.getElementById("scanUnsupported").hidden = true;
+    document.getElementById("scanResultWrap").hidden = true;
+    document.getElementById("scanCameraWrap").hidden = false;
+    document.getElementById("scanStatusLine").textContent = "Point the camera at a barcode.";
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function (stream) {
+      scanStream = stream;
+      var video = document.getElementById("scanVideo");
+      video.srcObject = stream;
+      barcodeDetector = new window.BarcodeDetector();
+      scanLoop();
+    }).catch(function (err) {
+      showScanUnsupported("Couldn't access the camera (" + err.message + "). Check camera permissions for this site in your browser settings.");
+    });
+  }
+
+  function scanLoop() {
+    if (!scanStream) return;
+    var video = document.getElementById("scanVideo");
+    if (video.readyState >= 2) {
+      barcodeDetector.detect(video).then(function (codes) {
+        if (codes && codes.length) { handleScanResult(codes[0].rawValue); return; }
+        scanRAF = requestAnimationFrame(scanLoop);
+      }).catch(function () {
+        scanRAF = requestAnimationFrame(scanLoop);
+      });
+    } else {
+      scanRAF = requestAnimationFrame(scanLoop);
+    }
+  }
+
+  function stopScanCamera() {
+    if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
+    if (scanStream) { scanStream.getTracks().forEach(function (t) { t.stop(); }); scanStream = null; }
+  }
+
+  function closeScanSheet() {
+    stopScanCamera();
+    scanSheet.hidden = true;
+  }
+
+  function openScanSheet(context) {
+    state.scanContext = context || "global";
+    document.getElementById("scanResultWrap").hidden = true;
+    document.getElementById("scanUnsupported").hidden = true;
+    document.getElementById("scanCameraWrap").hidden = true;
+    scanSheet.hidden = false;
+
+    if (!supportsBarcodeDetector()) {
+      showScanUnsupported("Barcode scanning isn't supported in this browser. You can still type a barcode manually.");
+      return;
+    }
+    startScanCamera();
+  }
+
+  function handleScanResult(code) {
+    stopScanCamera();
+
+    if (state.scanContext === "fill-field") {
+      document.getElementById("fieldBarcode").value = code;
+      scanSheet.hidden = true;
+      return;
+    }
+
+    document.getElementById("scanCameraWrap").hidden = true;
+    document.getElementById("scanResultWrap").hidden = false;
+
+    var item = state.items.find(function (it) { return it.barcode === code; });
+    var actionsEl = document.getElementById("scanResultActions");
+
+    if (item) {
+      document.getElementById("scanResultLine").textContent = 'Matches "' + item.name + '".';
+      actionsEl.innerHTML =
+        '<button type="button" class="btn-secondary" id="scanAddBatchBtn">Add batch</button>' +
+        '<button type="button" class="btn-secondary" id="scanWithdrawBtn">Withdraw</button>' +
+        '<button type="button" class="btn-ghost" id="scanAgainBtn">Scan again</button>';
+      document.getElementById("scanAddBatchBtn").onclick = function () {
+        closeScanSheet();
+        openBatchSheet(null, "direct", item.id);
+      };
+      document.getElementById("scanWithdrawBtn").onclick = function () {
+        closeScanSheet();
+        openWithdrawFor(item.id);
+      };
+    } else {
+      document.getElementById("scanResultLine").textContent = "Barcode " + code + " — no item matches yet.";
+      actionsEl.innerHTML =
+        '<button type="button" class="btn-secondary" id="scanCreateBtn">Create new item</button>' +
+        '<button type="button" class="btn-secondary" id="scanAttachBtn">Attach to existing item</button>' +
+        '<button type="button" class="btn-ghost" id="scanAgainBtn">Scan again</button>';
+      document.getElementById("scanCreateBtn").onclick = function () {
+        closeScanSheet();
+        openForm(null);
+        document.getElementById("fieldBarcode").value = code;
+      };
+      document.getElementById("scanAttachBtn").onclick = function () {
+        var name = prompt("Which item should this barcode attach to? Type its exact name.");
+        if (!name || !name.trim()) return;
+        var match = state.items.find(function (it) { return it.name.toLowerCase() === name.trim().toLowerCase(); });
+        if (!match) { alert('No item named "' + name.trim() + '" found.'); return; }
+        match.barcode = code;
+        match.updatedAt = new Date().toISOString();
+        saveItems();
+        closeScanSheet();
+        render();
+      };
+    }
+
+    document.getElementById("scanAgainBtn").onclick = function () {
+      document.getElementById("scanResultWrap").hidden = true;
+      startScanCamera();
+    };
+  }
+
+  document.getElementById("scanBtn").addEventListener("click", function () { openScanSheet("global"); });
+  document.getElementById("fieldBarcodeScanBtn").addEventListener("click", function () { openScanSheet("fill-field"); });
+  document.getElementById("scanCancelBtn").addEventListener("click", closeScanSheet);
+  scanSheet.addEventListener("click", function (e) { if (e.target === scanSheet) closeScanSheet(); });
 
   // ---------- settings sheet ----------
 

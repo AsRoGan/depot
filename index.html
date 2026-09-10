@@ -12,7 +12,10 @@
 
 <header class="topbar">
   <h1>Depot</h1>
-  <button id="settingsBtn" class="icon-btn" aria-label="Settings" title="Settings">⋯</button>
+  <div style="display:flex; gap:4px;">
+    <button id="scanBtn" class="icon-btn" aria-label="Scan barcode" title="Scan barcode">📷</button>
+    <button id="settingsBtn" class="icon-btn" aria-label="Settings" title="Settings">⋯</button>
+  </div>
 </header>
 
 <div class="controls">
@@ -58,6 +61,28 @@
   </div>
 </div>
 
+<!-- Barcode scan sheet -->
+<div id="scanSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Scan barcode</h2>
+
+    <p class="settings-desc" id="scanUnsupported" hidden></p>
+
+    <div id="scanCameraWrap" hidden>
+      <video id="scanVideo" class="scan-video" autoplay playsinline muted></video>
+      <p class="settings-desc" id="scanStatusLine">Point the camera at a barcode.</p>
+    </div>
+
+    <div id="scanResultWrap" hidden>
+      <p class="settings-desc" id="scanResultLine"></p>
+      <div class="sheet-actions" id="scanResultActions"></div>
+    </div>
+
+    <button id="scanCancelBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
 <!-- Item add/edit sheet -->
 <div id="itemSheet" class="sheet-backdrop" hidden>
   <form id="itemForm" class="sheet">
@@ -89,8 +114,11 @@
       </label>
     </div>
 
-    <label>Barcode <span class="hint">(optional — scan support coming soon, type it for now)</span>
-      <input type="text" id="fieldBarcode" inputmode="numeric" maxlength="40">
+    <label>Barcode <span class="hint">(optional)</span>
+      <div class="input-with-button">
+        <input type="text" id="fieldBarcode" inputmode="numeric" maxlength="40">
+        <button type="button" id="fieldBarcodeScanBtn" class="btn-secondary">📷</button>
+      </div>
     </label>
 
     <div class="batches-section">
