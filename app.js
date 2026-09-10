@@ -5,7 +5,7 @@
   var LS_HISTORY_KEY = "depot.history.v1";
   var LS_CATEGORIES_KEY = "depot.categories.v1";
   var LS_SETTINGS_KEY = "depot.settings.v1";
-  var APP_VERSION = "v13";
+  var APP_VERSION = "v14";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
 
   var state = {
@@ -36,7 +36,15 @@
     pendingImport: null,
     auditLocation: null,
     auditChecked: {},
-    scanContext: "global"
+    scanContext: "global",
+    scanMode: "single",
+    scanPaused: false,
+    scanSessionLog: [],
+    scanLastLocation: "",
+    scanLastHandledCode: null,
+    scanLastHandledAt: 0,
+    scanMultiCode: null,
+    scanMultiMatchedItemId: null
   };
 
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -576,6 +584,47 @@
     openBatchSheet(null, "direct", state.viewingId);
   });
 
+  function renderViewBarcodes(item) {
+    var container = document.getElementById("viewBarcodeList");
+    if (!item.barcodes.length) {
+      container.innerHTML = '<li class="batch-empty">No barcodes attached.</li>';
+      return;
+    }
+    container.innerHTML = item.barcodes.map(function (code) {
+      return '<li class="batch-row"><span class="batch-qty">' + escapeHtml(code) + '</span>' +
+        '<button type="button" class="icon-btn view-barcode-remove" data-code="' + escapeHtml(code) + '" title="Remove">🗑</button></li>';
+    }).join("");
+  }
+
+  document.getElementById("viewBarcodeList").addEventListener("click", function (e) {
+    var btn = e.target.closest(".view-barcode-remove");
+    if (!btn) return;
+    var item = state.items.find(function (it) { return it.id === state.viewingId; });
+    if (!item) return;
+    if (!confirm("Remove this barcode from the item?")) return;
+    item.barcodes = item.barcodes.filter(function (c) { return c !== btn.dataset.code; });
+    item.updatedAt = new Date().toISOString();
+    saveItems();
+    renderViewBarcodes(item);
+  });
+
+  document.getElementById("viewAddBarcodeBtn").addEventListener("click", function () {
+    var input = document.getElementById("viewNewBarcodeInput");
+    var code = input.value.trim();
+    if (!code) return;
+    var item = state.items.find(function (it) { return it.id === state.viewingId; });
+    if (!item) return;
+    if (item.barcodes.indexOf(code) === -1) item.barcodes.push(code);
+    item.updatedAt = new Date().toISOString();
+    saveItems();
+    input.value = "";
+    renderViewBarcodes(item);
+  });
+
+  document.getElementById("viewNewBarcodeScanBtn").addEventListener("click", function () {
+    openScanSheet("fill-view-barcode");
+  });
+
   function openView(id) {
     var item = state.items.find(function (it) { return it.id === id; });
     if (!item) return;
@@ -589,10 +638,11 @@
     if (item.unit) metaParts.push(item.unit);
     if (item.reorderThreshold !== null) metaParts.push("Reorder at " + formatQty(item.reorderThreshold));
     if (item.openShelfLifeDays !== null) metaParts.push("Once opened: " + item.openShelfLifeDays + "d");
-    if (item.barcodes && item.barcodes.length) metaParts.push("Barcodes: " + item.barcodes.join(", "));
+    if (item.barcodes && item.barcodes.length) metaParts.push(item.barcodes.length + " barcode(s)");
     document.getElementById("viewItemMeta").textContent = metaParts.join(" · ");
 
     renderViewBatches(item);
+    renderViewBarcodes(item);
 
     var notesEl = document.getElementById("viewNotesLine");
     if (item.notes) { notesEl.hidden = false; notesEl.textContent = item.notes; }
@@ -1768,6 +1818,7 @@
 
   function scanLoop() {
     if (!scanStream) return;
+    if (state.scanPaused) { scanRAF = requestAnimationFrame(scanLoop); return; }
     var video = document.getElementById("scanVideo");
     if (video.readyState >= 2) {
       barcodeDetector.detect(video).then(function (codes) {
@@ -1793,9 +1844,17 @@
 
   function openScanSheet(context) {
     state.scanContext = context || "global";
+    state.scanMode = "single";
+    state.scanPaused = false;
+    state.scanSessionLog = [];
+    state.scanLastHandledCode = null;
     document.getElementById("scanResultWrap").hidden = true;
     document.getElementById("scanUnsupported").hidden = true;
     document.getElementById("scanCameraWrap").hidden = true;
+    document.getElementById("scanMultiOverlay").hidden = true;
+    document.getElementById("scanSessionLog").hidden = true;
+    document.querySelectorAll("#scanModeSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "single"); });
+    document.getElementById("scanModeSegmented").hidden = state.scanContext !== "global";
     scanSheet.hidden = false;
 
     if (!supportsBarcodeDetector()) {
@@ -1805,16 +1864,128 @@
     startScanCamera();
   }
 
-  function handleScanResult(code) {
-    stopScanCamera();
+  document.getElementById("scanModeSegmented").addEventListener("click", function (e) {
+    var btn = e.target.closest(".segment");
+    if (!btn) return;
+    document.querySelectorAll("#scanModeSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
+    state.scanMode = btn.dataset.mode;
+  });
 
+  function renderScanSessionLog() {
+    var el = document.getElementById("scanSessionLog");
+    if (!state.scanSessionLog.length) { el.hidden = true; return; }
+    el.hidden = false;
+    el.innerHTML = state.scanSessionLog.map(function (entry) {
+      return '<li class="batch-row"><span class="batch-qty">' + escapeHtml(entry.name) + '</span>' +
+        '<span class="batch-expiry">' + formatQty(entry.qty) + (entry.unit ? " " + entry.unit : "") + '</span></li>';
+    }).join("");
+  }
+
+  function showMultiOverlay(code) {
+    var item = state.items.find(function (it) { return it.barcodes.indexOf(code) !== -1; });
+    state.scanMultiCode = code;
+    state.scanMultiMatchedItemId = item ? item.id : null;
+
+    document.getElementById("scanMultiOverlay").hidden = false;
+    var nameLabel = document.getElementById("scanMultiNameLabel");
+    var nameInput = document.getElementById("scanMultiNameInput");
+
+    if (item) {
+      document.getElementById("scanMultiLabel").textContent = 'Matches "' + item.name + '".';
+      nameLabel.hidden = true;
+      nameInput.value = item.name;
+    } else {
+      document.getElementById("scanMultiLabel").textContent =
+        "Barcode " + code + " — no item matches yet. Enter a name to create one, or type an existing item's name to attach this barcode to it.";
+      nameLabel.hidden = false;
+      nameInput.value = "";
+      document.getElementById("scanMultiNameSuggestions").innerHTML =
+        state.items.map(function (it) { return '<option value="' + escapeHtml(it.name) + '"></option>'; }).join("");
+    }
+
+    document.getElementById("scanMultiQty").value = "1";
+    document.getElementById("scanMultiLocation").value = state.scanLastLocation || "";
+    renderLocationSuggestions();
+    document.getElementById("scanMultiQty").focus();
+  }
+
+  document.getElementById("scanMultiAddBtn").addEventListener("click", function () {
+    var code = state.scanMultiCode;
+    var qty = roundQty(Number(document.getElementById("scanMultiQty").value)) || 1;
+    var location = document.getElementById("scanMultiLocation").value.trim() || null;
+    if (location) state.scanLastLocation = location;
+
+    var item = state.scanMultiMatchedItemId ? state.items.find(function (it) { return it.id === state.scanMultiMatchedItemId; }) : null;
+    if (!item) {
+      var typedName = document.getElementById("scanMultiNameInput").value.trim();
+      if (!typedName) { alert("Enter a name for this item."); return; }
+      item = state.items.find(function (it) { return it.name.toLowerCase() === typedName.toLowerCase(); });
+      if (item) {
+        if (item.barcodes.indexOf(code) === -1) item.barcodes.push(code);
+      } else {
+        var defaultCatId = state.categories.length ? state.categories[0].id : null;
+        item = {
+          id: uid(), name: typedName, categoryId: defaultCatId, subcategoryId: null, unit: "",
+          reorderThreshold: null, openShelfLifeDays: null, barcodes: [code], batches: [], notes: "",
+          updatedAt: new Date().toISOString()
+        };
+        state.items.push(item);
+      }
+    }
+
+    item.batches.push({ id: uid(), quantity: qty, expiry: null, expiryType: null, openDate: null, location: location });
+    item.updatedAt = new Date().toISOString();
+    saveItems();
+    render();
+
+    state.scanSessionLog.unshift({ name: item.name, qty: qty, unit: item.unit });
+    renderScanSessionLog();
+
+    document.getElementById("scanMultiOverlay").hidden = true;
+    state.scanPaused = false;
+  });
+
+  document.getElementById("scanMultiSkipBtn").addEventListener("click", function () {
+    document.getElementById("scanMultiOverlay").hidden = true;
+    state.scanPaused = false;
+  });
+
+  function handleScanResult(code) {
     if (state.scanContext === "fill-field") {
+      stopScanCamera();
       if (state.formBarcodes.indexOf(code) === -1) state.formBarcodes.push(code);
       renderFormBarcodes();
       scanSheet.hidden = true;
       return;
     }
 
+    if (state.scanContext === "fill-view-barcode") {
+      stopScanCamera();
+      var viewItem = state.items.find(function (it) { return it.id === state.viewingId; });
+      if (viewItem) {
+        if (viewItem.barcodes.indexOf(code) === -1) viewItem.barcodes.push(code);
+        viewItem.updatedAt = new Date().toISOString();
+        saveItems();
+        renderViewBarcodes(viewItem);
+      }
+      scanSheet.hidden = true;
+      return;
+    }
+
+    if (state.scanMode === "multi") {
+      var now = Date.now();
+      if (code === state.scanLastHandledCode && (now - state.scanLastHandledAt) < 3000) {
+        scanRAF = requestAnimationFrame(scanLoop);
+        return;
+      }
+      state.scanLastHandledCode = code;
+      state.scanLastHandledAt = now;
+      state.scanPaused = true;
+      showMultiOverlay(code);
+      return;
+    }
+
+    stopScanCamera();
     document.getElementById("scanCameraWrap").hidden = true;
     document.getElementById("scanResultWrap").hidden = false;
 

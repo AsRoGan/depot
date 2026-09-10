@@ -1,4 +1,4 @@
-var CACHE_NAME = "depot-cache-v13";
+var CACHE_NAME = "depot-cache-v14";
 var FILES_TO_CACHE = [
   "./index.html",
   "./style.css",

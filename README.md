@@ -302,3 +302,21 @@ now has its own delete button for one-off corrections.
 This remains manual (export → send the file → import), not live sync —
 see the conversation history for why live P2P sync was considered and
 deliberately set aside for now.
+
+## Edit barcodes from the view sheet
+
+The view sheet now has its own Barcodes list (add, remove, or scan-to-add)
+right alongside the batches — no need to open full Edit just to fix a
+mis-scanned or reassigned barcode.
+
+## Multi-scan mode
+
+The scan sheet now has a Single scan / Scan multiple toggle. In multi mode
+the camera never stops between scans: each detected barcode pauses
+detection and shows a quick inline form (quantity, optional location,
+and a name field if it's an unrecognized barcode) with **Add & keep
+scanning** or **Skip**. A running log below shows everything added this
+session so you don't lose track partway through. Location remembers the
+last one you typed, since a scanning session is usually one shelf at a
+time. The same barcode won't re-trigger the overlay for 3 seconds, so
+holding the camera steady on one item doesn't spam repeat prompts.

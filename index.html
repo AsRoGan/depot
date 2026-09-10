@@ -51,6 +51,15 @@
     <p class="settings-desc" id="viewItemMeta"></p>
     <ul id="viewBatchList" class="batch-list"></ul>
     <button type="button" id="viewAddBatchBtn" class="btn-secondary">Add batch</button>
+
+    <div class="batches-header"><span>Barcodes</span></div>
+    <ul id="viewBarcodeList" class="batch-list"></ul>
+    <div class="input-with-button">
+      <input type="text" id="viewNewBarcodeInput" inputmode="numeric" placeholder="Type or scan a barcode" maxlength="40">
+      <button type="button" id="viewNewBarcodeScanBtn" class="btn-secondary">📷</button>
+    </div>
+    <button type="button" id="viewAddBarcodeBtn" class="btn-secondary">Add barcode</button>
+
     <p class="settings-desc" id="viewNotesLine" hidden></p>
     <div class="sheet-actions">
       <button type="button" id="viewDeleteBtn" class="btn-danger">Delete</button>
@@ -69,10 +78,37 @@
 
     <p class="settings-desc" id="scanUnsupported" hidden></p>
 
+    <div class="segmented" id="scanModeSegmented">
+      <button type="button" class="segment is-active" data-mode="single">Single scan</button>
+      <button type="button" class="segment" data-mode="multi">Scan multiple</button>
+    </div>
+
     <div id="scanCameraWrap" hidden>
       <video id="scanVideo" class="scan-video" autoplay playsinline muted></video>
       <p class="settings-desc" id="scanStatusLine">Point the camera at a barcode.</p>
     </div>
+
+    <div id="scanMultiOverlay" hidden>
+      <p class="settings-desc" id="scanMultiLabel"></p>
+      <label id="scanMultiNameLabel" hidden>Item name
+        <input type="text" id="scanMultiNameInput" list="scanMultiNameSuggestions">
+        <datalist id="scanMultiNameSuggestions"></datalist>
+      </label>
+      <div class="field-row">
+        <label>Quantity
+          <input type="number" id="scanMultiQty" min="0.01" step="0.01" inputmode="decimal" value="1">
+        </label>
+        <label>Location <span class="hint">(optional)</span>
+          <input type="text" id="scanMultiLocation" list="locationSuggestions">
+        </label>
+      </div>
+      <div class="sheet-actions">
+        <button type="button" id="scanMultiSkipBtn" class="btn-ghost">Skip</button>
+        <button type="button" id="scanMultiAddBtn" class="btn-primary">Add &amp; keep scanning</button>
+      </div>
+    </div>
+
+    <ul id="scanSessionLog" class="batch-list" hidden></ul>
 
     <div id="scanResultWrap" hidden>
       <p class="settings-desc" id="scanResultLine"></p>
