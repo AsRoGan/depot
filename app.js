@@ -5,6 +5,7 @@
   var LS_HISTORY_KEY = "depot.history.v1";
   var LS_CATEGORIES_KEY = "depot.categories.v1";
   var LS_SETTINGS_KEY = "depot.settings.v1";
+  var APP_VERSION = "v13";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
 
   var state = {
@@ -1878,6 +1879,7 @@
     document.getElementById("syncStatusLine").textContent =
       "Last backup: " + relativeTime(state.settings.lastExportAt) + ". Last import: " + relativeTime(state.settings.lastImportAt) + ".";
     document.getElementById("deviceNameInput").value = state.settings.deviceName || "";
+    document.getElementById("buildVersionLine").textContent = "Build " + APP_VERSION + " — compare this between devices/tabs if something looks out of date.";
   }
 
   document.getElementById("settingsBtn").addEventListener("click", function () {
