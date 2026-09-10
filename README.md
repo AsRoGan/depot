@@ -279,3 +279,26 @@ In the history sheet: **Clear shown** removes whatever the current
 search/category filter has narrowed to (search an item's name first to
 clear just its records), **Clear all** wipes the whole log, and each row
 now has its own delete button for one-off corrections.
+
+## Export/Import improvements for household use
+
+- **Device name** (Settings) is embedded in backups you export and used in
+  the filename, so a shared folder of backups from multiple phones stays
+  distinguishable, and imports show whose backup it is and how old it is.
+- **True merge for items**: when the same item exists on both sides, the
+  one with the more recent edit timestamp wins — an edit from another
+  device is no longer silently dropped just because you already had that
+  item. Withdrawal history stays purely additive (a past withdrawal is a
+  fact, not something to reconcile). This is item-level, not batch-level —
+  if both sides edited the same item differently since the last sync, one
+  side's edit still wins wholesale rather than merging field-by-field.
+- **Categories merge subcategories too**, not just whole categories.
+- **Settings only come along on a full Replace**, never on Merge — your
+  thresholds aren't silently overwritten by someone else's backup — and
+  your device name is never overwritten by an import either way.
+- **Settings shows last backup / last import times** so it's obvious when
+  a sync is overdue.
+
+This remains manual (export → send the file → import), not live sync —
+see the conversation history for why live P2P sync was considered and
+deliberately set aside for now.

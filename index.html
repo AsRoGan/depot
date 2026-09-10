@@ -272,15 +272,15 @@
 
     <label>Items
       <div class="segmented" id="importItemsSegmented">
-        <button type="button" class="segment is-active" data-mode="merge">Merge</button>
-        <button type="button" class="segment" data-mode="replace">Replace</button>
+        <button type="button" class="segment is-active" data-mode="merge">Merge (keep newest)</button>
+        <button type="button" class="segment" data-mode="replace">Replace all</button>
       </div>
     </label>
 
     <label>Withdrawal history
       <div class="segmented" id="importHistorySegmented">
-        <button type="button" class="segment is-active" data-mode="merge">Merge</button>
-        <button type="button" class="segment" data-mode="replace">Replace</button>
+        <button type="button" class="segment is-active" data-mode="merge">Merge (add missing)</button>
+        <button type="button" class="segment" data-mode="replace">Replace all</button>
       </div>
     </label>
 
@@ -354,6 +354,10 @@
     <div class="sheet-handle"></div>
     <h2>Settings</h2>
     <p class="settings-desc">Everything is stored only on this device. Back up your list before reinstalling or switching devices.</p>
+    <p class="settings-desc" id="syncStatusLine"></p>
+    <label>This device's name <span class="hint">(shown on backups you export)</span>
+      <input type="text" id="deviceNameInput" placeholder="e.g. Mum's phone" maxlength="40">
+    </label>
     <div class="settings-actions">
       <button id="manageCategoriesBtn" class="btn-secondary">Manage categories</button>
       <button id="generateShoppingListBtn" class="btn-secondary">Generate shopping list</button>

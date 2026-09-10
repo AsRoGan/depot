@@ -11,7 +11,7 @@
     items: [],
     history: [],
     categories: [],
-    settings: { soonDays: 30, urgentDays: 7, depletionThreshold: 0 },
+    settings: { soonDays: 30, urgentDays: 7, depletionThreshold: 0, deviceName: "", lastExportAt: null, lastImportAt: null },
     activeCategory: "all",
     activeSubCategory: "all",
     activeLocation: "all",
@@ -248,6 +248,18 @@
     var month = String(d.getMonth() + 1).padStart(2, "0");
     var year = String(d.getFullYear()).slice(-2);
     return day + "-" + month + "-" + year;
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return "never";
+    var diffMs = Date.now() - new Date(iso).getTime();
+    var mins = Math.round(diffMs / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return mins + "m ago";
+    var hrs = Math.round(mins / 60);
+    if (hrs < 24) return hrs + "h ago";
+    var days = Math.round(hrs / 24);
+    return days + "d ago";
   }
 
   function addDays(dateStr, days) {
@@ -1329,6 +1341,23 @@
     return existing.concat(added);
   }
 
+  // For items specifically: when the same id exists on both sides, keep
+  // whichever has the more recent updatedAt, rather than silently dropping
+  // the incoming edit. This is what makes "Merge" safe for two people
+  // editing the same shared item on different devices.
+  function mergeItemsLWW(existing, incoming) {
+    var map = {};
+    existing.forEach(function (it) { map[it.id] = it; });
+    incoming.forEach(function (it) {
+      var cur = map[it.id];
+      if (!cur) { map[it.id] = it; return; }
+      var curTime = cur.updatedAt ? new Date(cur.updatedAt).getTime() : 0;
+      var incTime = it.updatedAt ? new Date(it.updatedAt).getTime() : 0;
+      if (incTime > curTime) map[it.id] = it;
+    });
+    return Object.keys(map).map(function (id) { return map[id]; });
+  }
+
   var importOptionsSheet = document.getElementById("importOptionsSheet");
   var importOptionsForm = document.getElementById("importOptionsForm");
 
@@ -1352,14 +1381,25 @@
         var importedHistory = Array.isArray(parsed) ? [] : (parsed.history || []);
         var importedCategories = Array.isArray(parsed) ? null : (parsed.categories || null);
         var importedSettings = Array.isArray(parsed) ? null : (parsed.settings || null);
+        var exportedBy = Array.isArray(parsed) ? "" : (parsed.exportedBy || "");
+        var exportedAt = Array.isArray(parsed) ? null : (parsed.exportedAt || null);
         if (!Array.isArray(importedItems)) throw new Error("File is not a valid backup");
 
         state.pendingImport = { items: importedItems, history: importedHistory, categories: importedCategories, settings: importedSettings };
 
+        var existingIds = {};
+        state.items.forEach(function (it) { existingIds[it.id] = true; });
+        var newCount = importedItems.filter(function (it) { return !existingIds[it.id]; }).length;
+        var overlapCount = importedItems.length - newCount;
+
+        var sourceLine = exportedBy || exportedAt
+          ? "Backup from " + (exportedBy || "an unnamed device") + (exportedAt ? ", taken " + relativeTime(exportedAt) : "") + ". "
+          : "";
+
         document.getElementById("importSummaryLine").textContent =
-          "This backup has " + importedItems.length + " item(s) and " + importedHistory.length +
-          " withdrawal record(s). You currently have " + state.items.length + " item(s) and " +
-          state.history.length + " record(s) on this device.";
+          sourceLine + "Contains " + importedItems.length + " item(s) — " + newCount + " new to this device, " +
+          overlapCount + " already tracked here (the most recently edited version of each is kept on Merge) — " +
+          "and " + importedHistory.length + " withdrawal record(s).";
 
         document.querySelectorAll("#importItemsSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "merge"); });
         document.querySelectorAll("#importHistorySegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "merge"); });
@@ -1384,13 +1424,32 @@
     var itemsMode = document.querySelector("#importItemsSegmented .segment.is-active").dataset.mode;
     var historyMode = document.querySelector("#importHistorySegmented .segment.is-active").dataset.mode;
 
-    state.items = itemsMode === "replace" ? state.pendingImport.items : mergeById(state.items, state.pendingImport.items);
+    state.items = itemsMode === "replace" ? state.pendingImport.items : mergeItemsLWW(state.items, state.pendingImport.items);
     state.history = historyMode === "replace" ? state.pendingImport.history : mergeById(state.history, state.pendingImport.history);
 
+    // Categories always reconcile additively, including subcategories —
+    // never silently dropped just because the parent category already exists.
     if (state.pendingImport.categories) {
-      state.pendingImport.categories.forEach(function (ic) { if (!getCategory(ic.id)) state.categories.push(ic); });
+      state.pendingImport.categories.forEach(function (ic) {
+        var existingCat = getCategory(ic.id);
+        if (!existingCat) { state.categories.push(ic); return; }
+        (ic.subcategories || []).forEach(function (isub) {
+          if (!existingCat.subcategories.some(function (s) { return s.id === isub.id; })) {
+            existingCat.subcategories.push(isub);
+          }
+        });
+      });
     }
-    if (state.pendingImport.settings) state.settings = state.pendingImport.settings;
+
+    // Settings (thresholds etc.) only come along on a full Replace — a
+    // Merge shouldn't silently change your thresholds to someone else's.
+    // Your device name is never overwritten by an import either way.
+    if (itemsMode === "replace" && state.pendingImport.settings) {
+      var myDeviceName = state.settings.deviceName;
+      state.settings = Object.assign({}, state.pendingImport.settings, { deviceName: myDeviceName });
+    }
+
+    state.settings.lastImportAt = new Date().toISOString();
 
     migrateItems(state.items);
     saveItems(); saveHistory(); saveCategories(); saveSettings();
@@ -1814,19 +1873,47 @@
   // ---------- settings sheet ----------
 
   var settingsSheet = document.getElementById("settingsSheet");
-  document.getElementById("settingsBtn").addEventListener("click", function () { settingsSheet.hidden = false; });
+
+  function renderSyncStatus() {
+    document.getElementById("syncStatusLine").textContent =
+      "Last backup: " + relativeTime(state.settings.lastExportAt) + ". Last import: " + relativeTime(state.settings.lastImportAt) + ".";
+    document.getElementById("deviceNameInput").value = state.settings.deviceName || "";
+  }
+
+  document.getElementById("settingsBtn").addEventListener("click", function () {
+    renderSyncStatus();
+    settingsSheet.hidden = false;
+  });
   document.getElementById("settingsCloseBtn").addEventListener("click", function () { settingsSheet.hidden = true; });
   settingsSheet.addEventListener("click", function (e) { if (e.target === settingsSheet) settingsSheet.hidden = true; });
 
+  document.getElementById("deviceNameInput").addEventListener("change", function (e) {
+    state.settings.deviceName = e.target.value.trim();
+    saveSettings();
+  });
+
+  function slugify(s) {
+    return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+
   document.getElementById("exportBtn").addEventListener("click", function () {
-    var backup = { items: state.items, history: state.history, categories: state.categories, settings: state.settings };
+    state.settings.lastExportAt = new Date().toISOString();
+    saveSettings();
+
+    var backup = {
+      exportedAt: state.settings.lastExportAt,
+      exportedBy: state.settings.deviceName || "",
+      items: state.items, history: state.history, categories: state.categories, settings: state.settings
+    };
     var blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url;
-    a.download = "depot-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+    var namePart = slugify(state.settings.deviceName);
+    a.download = "depot-backup-" + (namePart ? namePart + "-" : "") + new Date().toISOString().slice(0, 10) + ".json";
     a.click();
     URL.revokeObjectURL(url);
+    renderSyncStatus();
   });
 
   document.getElementById("clearAllBtn").addEventListener("click", function () {
@@ -1868,7 +1955,10 @@
       state.history = results[1];
       var catsFromDb = results[2];
       state.categories = catsFromDb.length ? catsFromDb : defaultCategories();
-      state.settings = results[3] || { soonDays: 30, urgentDays: 7, depletionThreshold: 0 };
+      state.settings = results[3] || { soonDays: 30, urgentDays: 7, depletionThreshold: 0, deviceName: "", lastExportAt: null, lastImportAt: null };
+      if (state.settings.deviceName === undefined) state.settings.deviceName = "";
+      if (state.settings.lastExportAt === undefined) state.settings.lastExportAt = null;
+      if (state.settings.lastImportAt === undefined) state.settings.lastImportAt = null;
 
       var itemsChanged = migrateItems(state.items);
       var historyChanged = migrateHistory(state.history);
