@@ -5,8 +5,40 @@
   var LS_HISTORY_KEY = "depot.history.v1";
   var LS_CATEGORIES_KEY = "depot.categories.v1";
   var LS_SETTINGS_KEY = "depot.settings.v1";
-  var APP_VERSION = "v17";
+  var APP_VERSION = "v18";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
+
+  function showAppError(message, error) {
+    console.error(message, error);
+    var banner = document.getElementById("appErrorNotice");
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "appErrorNotice";
+      banner.setAttribute("role", "alert");
+      banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:100;padding:16px;background:#fff;color:#23261f;border-bottom:2px solid #b23a2e";
+      var text = document.createElement("p"); text.id = "appErrorText"; banner.appendChild(text);
+      var dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.textContent = "Dismiss";
+      dismiss.onclick = function () { banner.hidden = true; }; banner.appendChild(dismiss);
+      document.body.appendChild(banner);
+    }
+    document.getElementById("appErrorText").textContent = message + " — " + APP_VERSION + ": " + (error && error.message ? error.message : String(error || "Unknown error"));
+    banner.hidden = false;
+  }
+  window.addEventListener("error", function (event) { if (event.error) showAppError("The action could not finish", event.error); });
+  window.addEventListener("unhandledrejection", function (event) { showAppError("The action could not finish", event.reason); });
+
+  // Old cached HTML may outlive a script update. Restore missing controls without
+  // touching inventory, photos or any other persisted data.
+  function ensureCurrentControls() {
+    var unitInput = document.getElementById("fieldUnit");
+    if (unitInput && !document.getElementById("unitSuggestions")) {
+      var list = document.createElement("datalist"); list.id = "unitSuggestions";
+      unitInput.parentNode.appendChild(list);
+    }
+    if (unitInput) unitInput.setAttribute("list", "unitSuggestions");
+
+  }
+  ensureCurrentControls();
 
   var state = {
     items: [],
@@ -49,8 +81,8 @@
     scanLastLocation: "",
     scanLastHandledCode: null,
     scanLastHandledAt: 0,
-    scanMultiCode: null,
-    scanMultiMatchedItemId: null,
+    multiScanEditor: null,
+    editorSaving: false,
     shoppingListResults: []
   };
 
@@ -413,11 +445,71 @@
     });
     return out;
   }
+  var locationPickers = [];
+
+  function closeLocationSuggestions() {
+    locationPickers.forEach(function (picker) { picker.close(); });
+  }
+
   function renderLocationSuggestions() {
-    var dl = document.getElementById("locationSuggestions");
-    dl.innerHTML = allLocations().map(function (loc) {
-      return '<option value="' + escapeHtml(loc.name) + '"></option>';
-    }).join("");
+    var input = document.getElementById("batchLocation");
+    if (input.dataset.locationPicker) { closeLocationSuggestions(); return; }
+    input.dataset.locationPicker = "true";
+    input.removeAttribute("list");
+    input.setAttribute("autocomplete", "off");
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    var wrapper = document.createElement("div"); wrapper.className = "location-picker";
+    input.parentNode.insertBefore(wrapper, input); wrapper.appendChild(input);
+    var toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "location-toggle";
+    toggle.textContent = "▾"; toggle.setAttribute("aria-label", "Show saved locations");
+    var list = document.createElement("div"); list.className = "location-options"; list.id = "batchLocationOptions";
+    list.setAttribute("role", "listbox"); list.hidden = true;
+    input.setAttribute("aria-controls", list.id); toggle.setAttribute("aria-controls", list.id);
+    wrapper.appendChild(toggle); wrapper.appendChild(list);
+    var active = -1;
+    function close() { list.hidden = true; active = -1; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); }
+    function show(all) {
+      var query = input.value.trim().toLowerCase();
+      var matches = allLocations().filter(function (loc) { return all || (query && loc.name.toLowerCase().indexOf(query) !== -1); });
+      list.replaceChildren(); active = -1; input.removeAttribute("aria-activedescendant");
+      if (!matches.length) { close(); return; }
+      matches.forEach(function (loc, index) {
+        var option = document.createElement("button"); option.type = "button"; option.tabIndex = -1;
+        option.id = list.id + "-" + index; option.setAttribute("role", "option"); option.setAttribute("aria-selected", "false");
+        option.textContent = loc.name;
+        option.addEventListener("pointerdown", function (e) { e.preventDefault(); });
+        option.addEventListener("click", function (e) { e.preventDefault(); input.value = loc.name; close(); input.focus(); input.dispatchEvent(new Event("change", { bubbles: true })); });
+        list.appendChild(option);
+      });
+      var rect = input.getBoundingClientRect();
+      var viewport = window.visualViewport;
+      var bottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+      var roomBelow = bottom - rect.bottom - 12;
+      var roomAbove = rect.top - (viewport ? viewport.offsetTop : 0) - 12;
+      var above = roomBelow < 140 && roomAbove > roomBelow;
+      list.classList.toggle("above", above);
+      list.style.maxHeight = Math.max(44, Math.min(200, above ? roomAbove : roomBelow)) + "px";
+      list.hidden = false; input.setAttribute("aria-expanded", "true");
+    }
+    toggle.addEventListener("pointerdown", function (e) { e.preventDefault(); });
+    toggle.addEventListener("click", function (e) { e.preventDefault(); if (list.hidden) show(true); else close(); });
+    input.addEventListener("input", function () { show(false); });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { close(); e.preventDefault(); return; }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault(); if (list.hidden) show(!input.value.trim());
+        var options = list.querySelectorAll('[role="option"]'); if (!options.length || list.hidden) return;
+        active = (active + (e.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+        options.forEach(function (option, i) { option.setAttribute("aria-selected", String(i === active)); });
+        input.setAttribute("aria-activedescendant", options[active].id); options[active].scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter" && !list.hidden && active >= 0) { e.preventDefault(); list.children[active].click(); }
+    });
+    wrapper.addEventListener("focusout", function (e) { if (!wrapper.contains(e.relatedTarget)) close(); });
+    document.addEventListener("pointerdown", function (e) { if (!wrapper.contains(e.target)) close(); });
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", close);
+    locationPickers.push({ close: close });
   }
 
   // ---------- unit records ----------
@@ -447,6 +539,7 @@
   }
 
   function renderUnitSuggestions() {
+    ensureCurrentControls();
     document.getElementById("unitSuggestions").innerHTML = state.units.slice()
       .sort(function (a, b) { return a.name.localeCompare(b.name); })
       .map(function (u) { return '<option value="' + escapeHtml(u.name) + '"></option>'; }).join("");
@@ -1112,7 +1205,7 @@
     batchQtyInput.value = batch ? formatQty(batch.quantity) : "1";
     document.getElementById("batchExpiry").value = batch ? (batch.expiry || "") : "";
     document.getElementById("batchOpenDate").value = batch ? (batch.openDate || "") : "";
-    document.getElementById("batchLocation").value = batch ? (locationName(batch.locationId) || "") : "";
+    document.getElementById("batchLocation").value = batch ? (locationName(batch.locationId) || "") : (state.multiScanEditor ? state.scanLastLocation : "");
     renderLocationSuggestions();
 
     var type = batch && batch.expiryType ? batch.expiryType : "use_by";
@@ -1125,11 +1218,14 @@
   }
 
   function closeBatchSheet() {
+    if (state.editorSaving) return;
+    closeLocationSuggestions();
     batchSheet.hidden = true;
     batchForm.reset();
     state.editingBatchId = null;
     state.batchEditContext = "form";
     state.batchEditItemId = null;
+    resumeMultiScan("batch");
   }
 
   document.getElementById("addBatchBtn").addEventListener("click", function () { openBatchSheet(null, "form"); });
@@ -1143,44 +1239,50 @@
 
   batchForm.addEventListener("submit", function (e) {
     e.preventDefault();
+    if (state.editorSaving || !batchForm.reportValidity()) return;
     var qty = roundQty(Number(batchQtyInput.value));
-    if (!qty || qty <= 0) return;
+    if (!Number.isFinite(qty) || qty <= 0) return;
     var expiry = document.getElementById("batchExpiry").value || null;
     var activeSeg = document.querySelector("#batchExpiryTypeSegmented .segment.is-active");
     var type = expiry ? (activeSeg ? activeSeg.dataset.type : "use_by") : null;
     var openDate = document.getElementById("batchOpenDate").value || null;
-    var locationId = resolveLocationByName(document.getElementById("batchLocation").value.trim());
-
-    if (state.batchEditContext === "direct") {
-      var item = state.items.find(function (it) { return it.id === state.batchEditItemId; });
-      var newBatch = null;
-      if (item) {
-        if (state.editingBatchId) {
-          var db = item.batches.find(function (x) { return x.id === state.editingBatchId; });
-          if (db) { db.quantity = qty; db.expiry = expiry; db.expiryType = type; db.openDate = openDate; db.locationId = locationId; }
-        } else {
-          newBatch = { id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, locationId: locationId };
-          item.batches.push(newBatch);
-        }
-        item.updatedAt = new Date().toISOString();
-        saveItems();
-        renderViewBatches(item);
-        render();
-        if (newBatch && !locationAuditSheet.hidden && state.auditLocation) {
-          state.auditChecked[newBatch.id] = true;
-          renderAuditChecklist();
-        }
-      }
-    } else {
-      if (state.editingBatchId) {
-        var b = state.formBatches.find(function (x) { return x.id === state.editingBatchId; });
-        if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; b.openDate = openDate; b.locationId = locationId; }
-      } else {
-        state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, locationId: locationId });
-      }
+    var typedLocation = document.getElementById("batchLocation").value.trim();
+    var locationId = resolveLocationByName(typedLocation);
+    if (state.batchEditContext !== "direct") {
+      var draft = state.editingBatchId ? state.formBatches.find(function (b) { return b.id === state.editingBatchId; }) : null;
+      var values = { quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, locationId: locationId };
+      if (draft) Object.assign(draft, values);
+      else state.formBatches.push(Object.assign({ id: uid() }, values));
+      if (state.multiScanEditor) state.scanLastLocation = typedLocation;
       renderFormBatches();
+      closeBatchSheet();
+      return;
     }
-    closeBatchSheet();
+    var items = JSON.parse(JSON.stringify(state.items));
+    var item = items.find(function (it) { return it.id === state.batchEditItemId; });
+    if (!item) return;
+    var batch = state.editingBatchId ? item.batches.find(function (b) { return b.id === state.editingBatchId; }) : null;
+    var newBatch = !state.editingBatchId;
+    if (!batch) { batch = { id: uid() }; item.batches.push(batch); }
+    Object.assign(batch, { quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, locationId: locationId });
+    item.updatedAt = new Date().toISOString();
+    state.editorSaving = true;
+    batchForm.inert = true;
+    idbReplaceStores({ items: items, locations: state.locations, units: state.units }).then(function () {
+      state.items = items;
+      if (state.multiScanEditor) state.scanLastLocation = typedLocation;
+      renderViewBatches(item);
+      render();
+      if (newBatch && !locationAuditSheet.hidden && state.auditLocation) {
+        state.auditChecked[batch.id] = true;
+        renderAuditChecklist();
+      }
+      logMultiScan(item, qty);
+      state.editorSaving = false;
+      closeBatchSheet();
+    }).catch(function (err) {
+      showAppError("Couldn't save the batch. Your stock has not changed; try again", err);
+    }).finally(function () { state.editorSaving = false; batchForm.inert = false; });
   });
 
   // ---------- item form open/close/submit ----------
@@ -1217,10 +1319,12 @@
   }
 
   function closeForm() {
+    if (state.editorSaving) return;
     itemSheet.hidden = true;
     itemForm.reset();
     state.editingId = null;
     state.formBatches = [];
+    resumeMultiScan("item");
   }
 
   document.getElementById("fab").addEventListener("click", function () { openForm(null); });
@@ -1230,6 +1334,7 @@
 
   itemForm.addEventListener("submit", function (e) {
     e.preventDefault();
+    if (state.editorSaving || !itemForm.reportValidity()) return;
     var name = document.getElementById("fieldName").value.trim();
     if (!name) return;
 
@@ -1251,19 +1356,28 @@
       updatedAt: new Date().toISOString()
     };
 
+    var items = state.items.slice();
     if (state.editingId) {
-      var idx = state.items.findIndex(function (it) { return it.id === state.editingId; });
-      if (idx !== -1) state.items[idx] = Object.assign({}, state.items[idx], data);
+      var idx = items.findIndex(function (it) { return it.id === state.editingId; });
+      if (idx !== -1) items[idx] = Object.assign({}, items[idx], data);
     } else {
       data.id = uid();
       data.photoIds = [];
       data.heroPhotoId = null;
-      state.items.push(data);
+      items.push(data);
     }
 
-    saveItems();
-    closeForm();
-    render();
+    state.editorSaving = true;
+    itemForm.inert = true;
+    idbReplaceStores({ items: items, units: state.units, locations: state.locations }).then(function () {
+      state.items = items;
+      logMultiScan(data, itemTotalQty(data));
+      render();
+      state.editorSaving = false;
+      closeForm();
+    }).catch(function (err) {
+      showAppError("Couldn't save the item. Your inventory has not changed; try again", err);
+    }).finally(function () { state.editorSaving = false; itemForm.inert = false; });
   });
 
   deleteBtn.addEventListener("click", function () {
@@ -2301,7 +2415,6 @@
   var scanRAF = null;
   var barcodeDetector = null;
   var scanGeneration = 0;
-  var scanSaving = false;
 
   function supportsBarcodeDetector() { return "BarcodeDetector" in window; }
 
@@ -2360,21 +2473,27 @@
   }
 
   function closeScanSheet() {
-    if (scanSaving) return;
+    if (state.editorSaving) return;
     stopScanCamera();
     scanSheet.hidden = true;
+    if (state.scanContext === "fill-field") itemSheet.hidden = false;
+    if (state.scanContext === "fill-view-barcode") itemViewSheet.hidden = false;
   }
 
   function openScanSheet(context) {
     state.scanContext = context || "global";
     state.scanMode = "single";
     state.scanPaused = false;
-    state.scanSessionLog = [];
-    state.scanLastHandledCode = null;
+    if (state.scanContext === "global") {
+      state.multiScanEditor = null;
+      state.scanSessionLog = [];
+      state.scanLastHandledCode = null;
+    }
+    if (state.scanContext === "fill-field") itemSheet.hidden = true;
+    if (state.scanContext === "fill-view-barcode") itemViewSheet.hidden = true;
     document.getElementById("scanResultWrap").hidden = true;
     document.getElementById("scanUnsupported").hidden = true;
     document.getElementById("scanCameraWrap").hidden = true;
-    document.getElementById("scanMultiOverlay").hidden = true;
     document.getElementById("scanSessionLog").hidden = true;
     document.querySelectorAll("#scanModeSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "single"); });
     document.getElementById("scanModeSegmented").hidden = state.scanContext !== "global";
@@ -2389,7 +2508,7 @@
 
   document.getElementById("scanModeSegmented").addEventListener("click", function (e) {
     var btn = e.target.closest(".segment");
-    if (!btn || state.scanPaused || scanSaving) return;
+    if (!btn || state.scanPaused || state.editorSaving) return;
     document.querySelectorAll("#scanModeSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
     state.scanMode = btn.dataset.mode;
   });
@@ -2404,108 +2523,39 @@
     }).join("");
   }
 
-  function showMultiOverlay(code) {
+  function openMultiScanEditor(code) {
     var item = state.items.find(function (it) { return it.barcodes.indexOf(code) !== -1; });
-    state.scanMultiCode = code;
-    state.scanMultiMatchedItemId = item ? item.id : null;
-
-    document.getElementById("scanMultiOverlay").hidden = false;
-    var nameLabel = document.getElementById("scanMultiNameLabel");
-    var nameInput = document.getElementById("scanMultiNameInput");
-
+    stopScanCamera();
+    scanSheet.hidden = true;
     if (item) {
-      document.getElementById("scanMultiLabel").textContent = 'Matches "' + item.name + '".';
-      nameLabel.hidden = true;
-      nameInput.value = item.name;
+      state.multiScanEditor = "batch";
+      openBatchSheet(null, "direct", item.id);
     } else {
-      document.getElementById("scanMultiLabel").textContent =
-        "Barcode " + code + " — no item matches yet. Enter a name to create one, or type an existing item's name to attach this barcode to it.";
-      nameLabel.hidden = false;
-      nameInput.value = "";
-      document.getElementById("scanMultiNameSuggestions").innerHTML =
-        state.items.map(function (it) { return '<option value="' + escapeHtml(it.name) + '"></option>'; }).join("");
+      state.multiScanEditor = "item";
+      openForm(null);
+      state.formBarcodes = [code];
+      renderFormBarcodes();
     }
-
-    document.getElementById("scanMultiQty").value = "1";
-    document.getElementById("scanMultiExpiry").value = "";
-    document.getElementById("scanMultiOpenDate").value = "";
-    document.getElementById("scanMultiExpiryType").value = "use_by";
-    document.getElementById("scanMultiShelfLifeHint").textContent = item && item.openShelfLifeDays
-      ? "Once opened, good for " + item.openShelfLifeDays + " days."
-      : "Set the item's once-opened shelf life in Edit item to enable the countdown.";
-    document.getElementById("scanMultiLocation").value = state.scanLastLocation || "";
-    renderLocationSuggestions();
-    document.getElementById("scanMultiQty").focus();
   }
 
-  function resumeMultiScan() {
-    document.getElementById("scanMultiOverlay").hidden = true;
+  function logMultiScan(item, qty) {
+    if (!state.multiScanEditor) return;
+    state.scanSessionLog.unshift({ name: item.name, qty: qty, unit: item.unit });
+    renderScanSessionLog();
+  }
+
+  function resumeMultiScan(editor) {
+    if (state.multiScanEditor !== editor) return;
+    state.multiScanEditor = null;
+    state.scanContext = "global";
+    state.scanMode = "multi";
     state.scanLastHandledAt = Date.now();
     state.scanPaused = false;
-    scheduleScan();
+    scanSheet.hidden = false;
+    document.getElementById("scanModeSegmented").hidden = false;
+    document.querySelectorAll("#scanModeSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "multi"); });
+    startScanCamera();
   }
-
-  document.getElementById("scanMultiAddBtn").addEventListener("click", function () {
-    if (scanSaving || !state.scanPaused) return;
-    var qtyInput = document.getElementById("scanMultiQty");
-    var qty = roundQty(Number(qtyInput.value));
-    if (!qtyInput.reportValidity() || !Number.isFinite(qty) || qty <= 0) return;
-    var expiryInput = document.getElementById("scanMultiExpiry");
-    var openInput = document.getElementById("scanMultiOpenDate");
-    if (!expiryInput.reportValidity() || !openInput.reportValidity()) return;
-    var code = state.scanMultiCode;
-    var items = JSON.parse(JSON.stringify(state.items));
-    var locations = JSON.parse(JSON.stringify(state.locations));
-    var item = state.scanMultiMatchedItemId ? items.find(function (it) { return it.id === state.scanMultiMatchedItemId; }) : null;
-    if (!item) {
-      var typedName = document.getElementById("scanMultiNameInput").value.trim();
-      if (!typedName) { alert("Enter a name for this item."); return; }
-      item = items.find(function (it) { return it.name.toLowerCase() === typedName.toLowerCase(); });
-      if (!item) {
-        item = {
-          id: uid(), name: typedName, categoryId: state.categories.length ? state.categories[0].id : null,
-          subcategoryId: null, unit: "", unitId: null, reorderThreshold: null, openShelfLifeDays: null,
-          barcodes: [], batches: [], notes: "", photoIds: [], heroPhotoId: null
-        };
-        items.push(item);
-      }
-      if (item.barcodes.indexOf(code) === -1) item.barcodes.push(code);
-    }
-    var locationName = document.getElementById("scanMultiLocation").value.trim();
-    var location = locationName ? locations.find(function (loc) { return loc.name.toLowerCase() === locationName.toLowerCase(); }) : null;
-    if (locationName && !location) {
-      location = { id: uid(), name: locationName, photoIds: [], heroPhotoId: null, photosUpdatedAt: null, updatedAt: new Date().toISOString() };
-      locations.push(location);
-    }
-    item.batches.push({
-      id: uid(), quantity: qty, expiry: expiryInput.value || null,
-      expiryType: expiryInput.value ? document.getElementById("scanMultiExpiryType").value : null,
-      openDate: openInput.value || null, locationId: location ? location.id : null
-    });
-    item.updatedAt = new Date().toISOString();
-    scanSaving = true;
-    document.getElementById("scanMultiAddBtn").disabled = true;
-    document.getElementById("scanMultiSkipBtn").disabled = true;
-    idbReplaceStores({ items: items, locations: locations, units: state.units }).then(function () {
-      state.items = items;
-      state.locations = locations;
-      state.scanLastLocation = locationName;
-      state.scanSessionLog.unshift({ name: item.name, qty: qty, unit: item.unit });
-      render();
-      renderScanSessionLog();
-      resumeMultiScan();
-    }).catch(function (err) {
-      alert("Couldn't save this batch. Nothing was added; try again: " + err.message);
-    }).finally(function () {
-      scanSaving = false;
-      document.getElementById("scanMultiAddBtn").disabled = false;
-      document.getElementById("scanMultiSkipBtn").disabled = false;
-    });
-  });
-
-  document.getElementById("scanMultiSkipBtn").addEventListener("click", function () {
-    if (!scanSaving) resumeMultiScan();
-  });
 
   function handleScanResult(code) {
     if (state.scanContext === "fill-field") {
@@ -2513,6 +2563,7 @@
       if (state.formBarcodes.indexOf(code) === -1) state.formBarcodes.push(code);
       renderFormBarcodes();
       scanSheet.hidden = true;
+      itemSheet.hidden = false;
       return;
     }
 
@@ -2526,6 +2577,7 @@
         renderViewBarcodes(viewItem);
       }
       scanSheet.hidden = true;
+      itemViewSheet.hidden = false;
       return;
     }
 
@@ -2538,7 +2590,7 @@
       state.scanLastHandledCode = code;
       state.scanLastHandledAt = now;
       state.scanPaused = true;
-      showMultiOverlay(code);
+      openMultiScanEditor(code);
       return;
     }
 
@@ -2607,7 +2659,8 @@
     document.getElementById("syncStatusLine").textContent =
       "Last backup: " + relativeTime(state.settings.lastExportAt) + ". Last import: " + relativeTime(state.settings.lastImportAt) + ".";
     document.getElementById("deviceNameInput").value = state.settings.deviceName || "";
-    document.getElementById("buildVersionLine").textContent = "Build " + APP_VERSION + " — compare this between devices/tabs if something looks out of date.";
+    var pageBuild = document.querySelector('meta[name="depot-build"]');
+    document.getElementById("buildVersionLine").textContent = "Build " + APP_VERSION + " · Page " + (pageBuild ? pageBuild.content : "legacy (controls repaired)");
   }
 
   document.getElementById("settingsBtn").addEventListener("click", function () {
@@ -2660,18 +2713,59 @@
   // ---------- offline support ----------
 
   if ("serviceWorker" in navigator) {
+    var appRegistration = null;
+    var lastUpdateCheck = 0;
+    var reloaded = false;
+    var updateNotice = document.createElement("div"); updateNotice.id = "updateNotice"; updateNotice.hidden = true;
+    updateNotice.setAttribute("role", "status");
+    updateNotice.style.cssText = "position:fixed;bottom:0;left:0;right:0;z-index:50;padding:14px;background:#23261f;color:#fff;gap:12px;align-items:center";
+    var updateText = document.createElement("span");
+    updateText.textContent = "An app update is ready. Reload when you have finished editing. ";
+    var reloadButton = document.createElement("button"); reloadButton.type = "button"; reloadButton.textContent = "Reload app";
+    reloadButton.onclick = function () { window.location.reload(); };
+    updateNotice.appendChild(updateText); updateNotice.appendChild(reloadButton); document.body.appendChild(updateNotice);
+
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (reloaded) return;
+      reloaded = true;
+      var activeSheet = Array.from(document.querySelectorAll(".sheet-backdrop")).some(function (sheet) {
+        return !sheet.hidden && sheet.id !== "settingsSheet";
+      });
+      if (activeSheet) { updateNotice.hidden = false; return; }
+      window.location.reload();
+    });
+
+    function checkForAppUpdate(force) {
+      if (!appRegistration || (!force && Date.now() - lastUpdateCheck < 60000)) return Promise.resolve();
+      lastUpdateCheck = Date.now();
+      return appRegistration.update();
+    }
+    var updateButton = document.createElement("button"); updateButton.type = "button";
+    updateButton.className = "btn-secondary"; updateButton.textContent = "Check for app update";
+    var updateStatus = document.createElement("p"); updateStatus.id = "appUpdateStatus";
+    updateStatus.className = "settings-desc"; updateStatus.setAttribute("role", "status");
+    updateButton.onclick = function () {
+      if (!appRegistration) { showAppError("Update check unavailable", new Error("Reopen the app online and try again.")); return; }
+      updateButton.disabled = true;
+      updateStatus.textContent = "Checking for an update…";
+      checkForAppUpdate(true).then(function () {
+        updateStatus.textContent = appRegistration.installing ? "Downloading the update…" : "Update check finished. Current build: " + APP_VERSION + ".";
+      }).catch(function (err) { updateStatus.textContent = "Update check unavailable. Try again when online."; showAppError("Could not check for an update", err); })
+        .finally(function () { updateButton.disabled = false; });
+    };
+    document.querySelector("#settingsSheet .settings-actions").appendChild(updateButton);
+    document.querySelector("#settingsSheet .settings-actions").appendChild(updateStatus);
+    function backgroundUpdate(force) {
+      checkForAppUpdate(force).catch(function (err) { console.warn("Update check unavailable", err); });
+    }
     window.addEventListener("load", function () {
       navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(function (reg) {
-        reg.update();
+        appRegistration = reg;
+        backgroundUpdate(true);
       }).catch(function (err) { console.warn("Service worker registration failed", err); });
-
-      var reloaded = false;
-      navigator.serviceWorker.addEventListener("controllerchange", function () {
-        if (reloaded) return;
-        reloaded = true;
-        window.location.reload();
-      });
     });
+    document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") backgroundUpdate(false); });
+    window.addEventListener("online", function () { backgroundUpdate(true); });
   }
 
   // ---------- boot ----------

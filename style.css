@@ -1,3 +1,4 @@
+/* Depot build v18 */
 :root {
   --paper: #F2F1ED;
   --paper-raised: #FFFFFF;
@@ -316,6 +317,7 @@ body {
   margin: 4px auto 4px;
 }
 .sheet h2 { margin: 0 0 4px; font-size: 19px; }
+.sheet > * { flex-shrink: 0; }
 
 .sheet label {
   display: flex;
@@ -541,3 +543,12 @@ button.btn-primary, button.btn-secondary, button.btn-ghost, button.btn-danger,
 .field-row label { min-width: 0; }
 .field-row input { min-width: 0; width: 100%; }
 button:disabled { opacity: 0.6; cursor: wait; }
+
+/* Location suggestions belong to the field, never the native keyboard toolbar. */
+.location-picker { position: relative; display: flex; gap: 4px; }
+.location-picker input { flex: 1; min-width: 0; width: 100%; }
+.location-toggle { flex: 0 0 44px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-raised); color: var(--ink); font-size: 20px; }
+.location-options { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 35; overflow-y: auto; overscroll-behavior: contain; background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 3px 12px #0002; }
+.location-options.above { top: auto; bottom: calc(100% + 4px); }
+.location-options button { display: block; width: 100%; min-height: 44px; padding: 10px 12px; border: 0; background: transparent; color: var(--ink); text-align: left; font: inherit; }
+.location-options button:hover, .location-options button[aria-selected="true"] { background: var(--paper); }
