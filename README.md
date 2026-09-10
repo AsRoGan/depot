@@ -331,3 +331,42 @@ confirm-then-delete, and the undo window covers the mis-tap case just as
 well. "Delete all items" keeps its confirm dialog too, on top of undo,
 since wiping the whole inventory is a different order of consequence
 than removing one thing.
+
+## Locations are now records (not free text)
+
+Every batch's Location field now points at a real Location record instead
+of storing a plain string. Typing a name still works exactly as before —
+type it, and a matching record is found or created automatically. This
+unlocks:
+
+- **Manage locations** (Settings): rename or delete a location; renaming
+  updates every batch that points at it in one go.
+- **Location photos**: each location can hold a hero photo plus extras
+  (useful for large or awkward spaces). Managed from the Location Audit
+  screen, since that's the moment you're physically there with a phone
+  out. "Update photos" replaces the whole set at once — it does not
+  append to what's there, so a stale photo never lingers.
+
+## Item photos
+
+Each item can hold multiple photos: front of pack, back label, a
+manual page, whatever's useful. One is marked the "hero" photo (★) and
+shows first in a swipeable gallery in the item's View screen; add or
+remove photos there too. Photos are captured or picked via the browser's
+own file/camera chooser — no capture-only restriction, so a gallery photo
+or an existing scan works just as well as a fresh shot.
+
+Photos are compressed on the way in (resized + re-encoded as JPEG) to
+keep storage reasonable, and are stored locally in the browser's
+IndexedDB — **they are not included in JSON export/import**. A backup
+restores all your items, batches, categories, and locations, but not
+photos; those live only on the device that took them.
+
+## Undo
+
+Deleting an item, a category, a location, or clearing withdrawal history
+now shows a 6-second "Undo" toast instead of (or alongside) a
+confirmation dialog. Single-item and single-record deletes drop the
+confirm dialog entirely in favour of delete-then-undo. "Delete all
+items" keeps its confirm dialog on top of undo, since wiping the whole
+inventory is a different order of consequence than removing one thing.

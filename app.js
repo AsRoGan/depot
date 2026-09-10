@@ -5,13 +5,14 @@
   var LS_HISTORY_KEY = "depot.history.v1";
   var LS_CATEGORIES_KEY = "depot.categories.v1";
   var LS_SETTINGS_KEY = "depot.settings.v1";
-  var APP_VERSION = "v15";
+  var APP_VERSION = "v16";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
 
   var state = {
     items: [],
     history: [],
     categories: [],
+    locations: [],
     settings: { soonDays: 30, urgentDays: 7, depletionThreshold: 0, deviceName: "", lastExportAt: null, lastImportAt: null },
     activeCategory: "all",
     activeSubCategory: "all",
@@ -36,6 +37,10 @@
     pendingImport: null,
     auditLocation: null,
     auditChecked: {},
+    auditPhotoDraft: [],
+    auditPhotoDraftUrls: [],
+    auditHeaderPhotoUrl: null,
+    viewPhotoUrls: [],
     scanContext: "global",
     scanMode: "single",
     scanPaused: false,
@@ -44,7 +49,8 @@
     scanLastHandledCode: null,
     scanLastHandledAt: 0,
     scanMultiCode: null,
-    scanMultiMatchedItemId: null
+    scanMultiMatchedItemId: null,
+    shoppingListResults: []
   };
 
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -89,7 +95,7 @@
   // ---------- IndexedDB layer ----------
 
   var DB_NAME = "depot-db";
-  var DB_VERSION = 1;
+  var DB_VERSION = 2;
   var dbPromise = null;
 
   function openDB() {
@@ -98,7 +104,7 @@
       var req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = function (e) {
         var db = e.target.result;
-        ["items", "history", "categories"].forEach(function (name) {
+        ["items", "history", "categories", "locations", "photos"].forEach(function (name) {
           if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: "id" });
         });
         if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv", { keyPath: "key" });
@@ -153,9 +159,42 @@
     });
   }
 
+  function idbPutPhoto(record) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction("photos", "readwrite");
+        tx.objectStore("photos").put(record);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function idbGetPhoto(id) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var req = db.transaction("photos", "readonly").objectStore("photos").get(id);
+        req.onsuccess = function () { resolve(req.result || null); };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+
+  function idbDeletePhoto(id) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction("photos", "readwrite");
+        tx.objectStore("photos").delete(id);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
   function saveItems() { idbClearAndPutAll("items", state.items).catch(function (e) { console.error("Save items failed", e); }); }
   function saveHistory() { idbClearAndPutAll("history", state.history).catch(function (e) { console.error("Save history failed", e); }); }
   function saveCategories() { idbClearAndPutAll("categories", state.categories).catch(function (e) { console.error("Save categories failed", e); }); }
+  function saveLocations() { idbClearAndPutAll("locations", state.locations).catch(function (e) { console.error("Save locations failed", e); }); }
   function saveSettings() { idbSetKV("settings", state.settings).catch(function (e) { console.error("Save settings failed", e); }); }
 
   function migrateFromLocalStorage() {
@@ -177,6 +216,29 @@
       if (oldCategories) jobs.push(idbClearAndPutAll("categories", oldCategories));
       if (oldSettings) jobs.push(idbSetKV("settings", oldSettings));
       return Promise.all(jobs);
+    });
+  }
+
+  // ---------- image compression ----------
+
+  function compressImageFile(file, maxDim, quality) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        var w = Math.max(1, Math.round(img.width * scale));
+        var h = Math.max(1, Math.round(img.height * scale));
+        var canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        canvas.toBlob(function (blob) {
+          URL.revokeObjectURL(url);
+          if (blob) resolve(blob); else reject(new Error("Could not encode image"));
+        }, "image/jpeg", quality);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error("Could not load image")); };
+      img.src = url;
     });
   }
 
@@ -211,7 +273,7 @@
       }
 
       it.batches.forEach(function (b) {
-        if (b.location === undefined) { b.location = null; changed = true; }
+        if (b.location === undefined && b.locationId === undefined) { b.location = null; changed = true; }
         if (b.openDate === undefined) { b.openDate = null; changed = true; }
       });
 
@@ -222,6 +284,8 @@
         delete it.barcode;
         changed = true;
       }
+      if (it.photoIds === undefined) { it.photoIds = []; changed = true; }
+      if (it.heroPhotoId === undefined) { it.heroPhotoId = null; changed = true; }
     });
     return changed;
   }
@@ -232,6 +296,49 @@
       if (h.categoryId === undefined && h.category !== undefined) {
         h.categoryId = h.category; delete h.category; changed = true;
       }
+    });
+    return changed;
+  }
+
+  // Converts old free-text batch.location strings into real Location
+  // records (creating one per distinct name) and points each batch at
+  // its record via locationId instead.
+  function migrateBatchLocations(items, locations) {
+    var changed = false;
+    function findOrCreate(name) {
+      var existing = locations.find(function (l) { return l.name.toLowerCase() === name.toLowerCase(); });
+      if (existing) return existing;
+      var loc = { id: uid(), name: name, photoIds: [], heroPhotoId: null, photosUpdatedAt: null, updatedAt: new Date().toISOString() };
+      locations.push(loc);
+      changed = true;
+      return loc;
+    }
+    items.forEach(function (item) {
+      item.batches.forEach(function (b) {
+        if (b.location !== undefined) {
+          if (b.location) {
+            var loc = findOrCreate(b.location);
+            b.locationId = loc.id;
+          } else {
+            b.locationId = null;
+          }
+          delete b.location;
+          changed = true;
+        } else if (b.locationId === undefined) {
+          b.locationId = null;
+          changed = true;
+        }
+      });
+    });
+    return changed;
+  }
+
+  function normalizeLocations(locations) {
+    var changed = false;
+    locations.forEach(function (l) {
+      if (l.photoIds === undefined) { l.photoIds = []; changed = true; }
+      if (l.heroPhotoId === undefined) { l.heroPhotoId = null; changed = true; }
+      if (l.photosUpdatedAt === undefined) { l.photosUpdatedAt = null; changed = true; }
     });
     return changed;
   }
@@ -251,6 +358,45 @@
   function categoryName(categoryId) {
     var cat = getCategory(categoryId);
     return cat ? cat.name : "Uncategorized";
+  }
+
+  // ---------- location helpers ----------
+
+  function getLocation(id) { return state.locations.find(function (l) { return l.id === id; }) || null; }
+  function locationName(id) {
+    var l = getLocation(id);
+    return l ? l.name : null;
+  }
+  function allLocations() {
+    return state.locations.slice().sort(function (a, b) { return a.name.localeCompare(b.name); });
+  }
+  // Finds a location by name (case-insensitive) or creates one on the fly —
+  // this is what lets the Location field stay a plain text box while
+  // locations are real records underneath.
+  function resolveLocationByName(name) {
+    if (!name) return null;
+    var trimmed = name.trim();
+    if (!trimmed) return null;
+    var existing = state.locations.find(function (l) { return l.name.toLowerCase() === trimmed.toLowerCase(); });
+    if (existing) return existing.id;
+    var loc = { id: uid(), name: trimmed, photoIds: [], heroPhotoId: null, photosUpdatedAt: null, updatedAt: new Date().toISOString() };
+    state.locations.push(loc);
+    saveLocations();
+    return loc.id;
+  }
+  function batchLocationNames(item) {
+    var seen = {}; var out = [];
+    item.batches.forEach(function (b) {
+      var name = locationName(b.locationId);
+      if (name && !seen[name]) { seen[name] = true; out.push(name); }
+    });
+    return out;
+  }
+  function renderLocationSuggestions() {
+    var dl = document.getElementById("locationSuggestions");
+    dl.innerHTML = allLocations().map(function (loc) {
+      return '<option value="' + escapeHtml(loc.name) + '"></option>';
+    }).join("");
   }
 
   // ---------- batch / expiry helpers ----------
@@ -374,26 +520,6 @@
     return itemTotalQty(item) <= state.settings.depletionThreshold;
   }
 
-  function batchLocations(item) {
-    var seen = {};
-    var out = [];
-    item.batches.forEach(function (b) {
-      if (b.location && !seen[b.location]) { seen[b.location] = true; out.push(b.location); }
-    });
-    return out;
-  }
-
-  function allKnownLocations() {
-    var seen = {};
-    var out = [];
-    state.items.forEach(function (it) {
-      it.batches.forEach(function (b) {
-        if (b.location && !seen[b.location]) { seen[b.location] = true; out.push(b.location); }
-      });
-    });
-    return out.sort();
-  }
-
   // ---------- main list rendering ----------
 
   var listEl = document.getElementById("itemList");
@@ -414,10 +540,10 @@
         }
         if (state.soonOnly && !isSoon(it)) return false;
         if (state.depletedOnly && !isDepleted(it)) return false;
-        if (state.activeLocation !== "all" && batchLocations(it).indexOf(state.activeLocation) === -1) return false;
+        if (state.activeLocation !== "all" && !it.batches.some(function (b) { return b.locationId === state.activeLocation; })) return false;
         if (state.search) {
           var q = state.search.toLowerCase();
-          var hay = (it.name + " " + batchLocations(it).join(" ") + " " + (it.notes || "") + " " + (it.barcode || "")).toLowerCase();
+          var hay = (it.name + " " + batchLocationNames(it).join(" ") + " " + (it.notes || "") + " " + it.barcodes.join(" ")).toLowerCase();
           if (hay.indexOf(q) === -1) return false;
         }
         return true;
@@ -467,12 +593,12 @@
 
   function renderLocationFilters() {
     var container = document.getElementById("locationChips");
-    var locs = allKnownLocations();
+    var locs = allLocations();
     if (!locs.length) { container.hidden = true; container.innerHTML = ""; return; }
     container.hidden = false;
     var html = '<button class="chip' + (state.activeLocation === "all" ? " is-active" : "") + '" data-location="all">All locations</button>';
     locs.forEach(function (loc) {
-      html += '<button class="chip' + (state.activeLocation === loc ? " is-active" : "") + '" data-location="' + escapeHtml(loc) + '">' + escapeHtml(loc) + '</button>';
+      html += '<button class="chip' + (state.activeLocation === loc.id ? " is-active" : "") + '" data-location="' + loc.id + '">' + escapeHtml(loc.name) + '</button>';
     });
     container.innerHTML = html;
   }
@@ -506,7 +632,7 @@
       var subName = getSubcategory(item.categoryId, item.subcategoryId);
       var subParts = [];
       if (subName) subParts.push(subName.name);
-      var locs = batchLocations(item);
+      var locs = batchLocationNames(item);
       if (locs.length) subParts.push(locs.join(", "));
 
       var qtyText, expiryLabel, expiryCls;
@@ -586,7 +712,8 @@
       var status = eff ? expiryStatus(eff.date, eff.type) : { label: "No expiry", cls: "" };
       if (eff && eff.source === "opened") status.label += " (from open date)";
       var qtyText = formatQty(b.quantity) + (item.unit ? " " + item.unit : "");
-      var locText = b.location ? " · " + escapeHtml(b.location) : "";
+      var locName = locationName(b.locationId);
+      var locText = locName ? " · " + escapeHtml(locName) : "";
       return '<li class="batch-row" data-id="' + b.id + '">' +
         '<span class="batch-qty">' + qtyText + '</span>' +
         '<span class="batch-expiry ' + status.cls + '">' + status.label + locText + '</span>' +
@@ -646,6 +773,86 @@
     openScanSheet("fill-view-barcode");
   });
 
+  // ---------- item photos (view sheet) ----------
+
+  function revokeViewPhotoUrls() {
+    state.viewPhotoUrls.forEach(function (u) { URL.revokeObjectURL(u); });
+    state.viewPhotoUrls = [];
+  }
+
+  function renderItemPhotos(item) {
+    revokeViewPhotoUrls();
+    var galleryEl = document.getElementById("viewPhotoGallery");
+    var thumbsEl = document.getElementById("viewPhotoThumbs");
+    var ids = item.photoIds || [];
+    if (!ids.length) { galleryEl.innerHTML = ""; thumbsEl.innerHTML = ""; return; }
+
+    var ordered = (item.heroPhotoId && ids.indexOf(item.heroPhotoId) !== -1)
+      ? [item.heroPhotoId].concat(ids.filter(function (id) { return id !== item.heroPhotoId; }))
+      : ids.slice();
+
+    Promise.all(ordered.map(function (id) { return idbGetPhoto(id); })).then(function (records) {
+      var slidesHtml = "", thumbsHtml = "";
+      records.forEach(function (rec) {
+        if (!rec) return;
+        var url = URL.createObjectURL(rec.blob);
+        state.viewPhotoUrls.push(url);
+        slidesHtml += '<img class="photo-slide" src="' + url + '" alt="">';
+        var isHero = rec.id === item.heroPhotoId;
+        thumbsHtml += '<div class="photo-thumb">' +
+          '<img src="' + url + '" alt="">' +
+          '<button type="button" class="icon-btn photo-hero-toggle" data-id="' + rec.id + '" title="' + (isHero ? "Hero photo" : "Make hero") + '">' + (isHero ? "★" : "☆") + '</button>' +
+          '<button type="button" class="icon-btn photo-delete" data-id="' + rec.id + '" title="Delete">🗑</button>' +
+        '</div>';
+      });
+      galleryEl.innerHTML = slidesHtml;
+      thumbsEl.innerHTML = thumbsHtml;
+    });
+  }
+
+  document.getElementById("viewAddPhotoInput").addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    var item = state.items.find(function (it) { return it.id === state.viewingId; });
+    if (!item) return;
+    compressImageFile(file, 1280, 0.75).then(function (blob) {
+      var photoId = uid();
+      return idbPutPhoto({ id: photoId, blob: blob, createdAt: new Date().toISOString() }).then(function () {
+        item.photoIds = (item.photoIds || []).concat([photoId]);
+        if (!item.heroPhotoId) item.heroPhotoId = photoId;
+        item.updatedAt = new Date().toISOString();
+        saveItems();
+        renderItemPhotos(item);
+      });
+    }).catch(function (err) { alert("Couldn't process that photo: " + err.message); });
+  });
+
+  document.getElementById("viewPhotoThumbs").addEventListener("click", function (e) {
+    var item = state.items.find(function (it) { return it.id === state.viewingId; });
+    if (!item) return;
+    var heroBtn = e.target.closest(".photo-hero-toggle");
+    if (heroBtn) {
+      item.heroPhotoId = heroBtn.dataset.id;
+      item.updatedAt = new Date().toISOString();
+      saveItems();
+      renderItemPhotos(item);
+      return;
+    }
+    var delBtn = e.target.closest(".photo-delete");
+    if (delBtn) {
+      var pid = delBtn.dataset.id;
+      if (!confirm("Delete this photo?")) return;
+      item.photoIds = (item.photoIds || []).filter(function (id) { return id !== pid; });
+      if (item.heroPhotoId === pid) item.heroPhotoId = item.photoIds[0] || null;
+      item.updatedAt = new Date().toISOString();
+      saveItems();
+      idbDeletePhoto(pid);
+      renderItemPhotos(item);
+      return;
+    }
+  });
+
   function openView(id) {
     var item = state.items.find(function (it) { return it.id === id; });
     if (!item) return;
@@ -664,6 +871,7 @@
 
     renderViewBatches(item);
     renderViewBarcodes(item);
+    renderItemPhotos(item);
 
     var notesEl = document.getElementById("viewNotesLine");
     if (item.notes) { notesEl.hidden = false; notesEl.textContent = item.notes; }
@@ -771,7 +979,8 @@
       var status = eff ? expiryStatus(eff.date, eff.type) : { label: "No expiry", cls: "" };
       if (eff && eff.source === "opened") status.label += " (from open date)";
       var qtyText = formatQty(b.quantity) + (unit ? " " + unit : "");
-      var locText = b.location ? " · " + escapeHtml(b.location) : "";
+      var locName = locationName(b.locationId);
+      var locText = locName ? " · " + escapeHtml(locName) : "";
       return '<li class="batch-row" data-id="' + b.id + '">' +
         '<span class="batch-qty">' + qtyText + '</span>' +
         '<span class="batch-expiry ' + status.cls + '">' + status.label + locText + '</span>' +
@@ -827,13 +1036,6 @@
   var batchForm = document.getElementById("batchForm");
   var batchQtyInput = document.getElementById("batchQty");
 
-  function renderLocationSuggestions() {
-    var dl = document.getElementById("locationSuggestions");
-    dl.innerHTML = allKnownLocations().map(function (loc) {
-      return '<option value="' + escapeHtml(loc) + '"></option>';
-    }).join("");
-  }
-
   function openBatchSheet(batchId, context, itemId) {
     state.batchEditContext = context || "form";
     state.batchEditItemId = itemId || null;
@@ -851,7 +1053,7 @@
     batchQtyInput.value = batch ? formatQty(batch.quantity) : "1";
     document.getElementById("batchExpiry").value = batch ? (batch.expiry || "") : "";
     document.getElementById("batchOpenDate").value = batch ? (batch.openDate || "") : "";
-    document.getElementById("batchLocation").value = batch ? (batch.location || "") : "";
+    document.getElementById("batchLocation").value = batch ? (locationName(batch.locationId) || "") : "";
     renderLocationSuggestions();
 
     var type = batch && batch.expiryType ? batch.expiryType : "use_by";
@@ -888,7 +1090,7 @@
     var activeSeg = document.querySelector("#batchExpiryTypeSegmented .segment.is-active");
     var type = expiry ? (activeSeg ? activeSeg.dataset.type : "use_by") : null;
     var openDate = document.getElementById("batchOpenDate").value || null;
-    var location = document.getElementById("batchLocation").value.trim() || null;
+    var locationId = resolveLocationByName(document.getElementById("batchLocation").value.trim());
 
     if (state.batchEditContext === "direct") {
       var item = state.items.find(function (it) { return it.id === state.batchEditItemId; });
@@ -896,9 +1098,9 @@
       if (item) {
         if (state.editingBatchId) {
           var db = item.batches.find(function (x) { return x.id === state.editingBatchId; });
-          if (db) { db.quantity = qty; db.expiry = expiry; db.expiryType = type; db.openDate = openDate; db.location = location; }
+          if (db) { db.quantity = qty; db.expiry = expiry; db.expiryType = type; db.openDate = openDate; db.locationId = locationId; }
         } else {
-          newBatch = { id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, location: location };
+          newBatch = { id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, locationId: locationId };
           item.batches.push(newBatch);
         }
         item.updatedAt = new Date().toISOString();
@@ -913,9 +1115,9 @@
     } else {
       if (state.editingBatchId) {
         var b = state.formBatches.find(function (x) { return x.id === state.editingBatchId; });
-        if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; b.openDate = openDate; b.location = location; }
+        if (b) { b.quantity = qty; b.expiry = expiry; b.expiryType = type; b.openDate = openDate; b.locationId = locationId; }
       } else {
-        state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, location: location });
+        state.formBatches.push({ id: uid(), quantity: qty, expiry: expiry, expiryType: type, openDate: openDate, locationId: locationId });
       }
       renderFormBatches();
     }
@@ -992,6 +1194,8 @@
       if (idx !== -1) state.items[idx] = Object.assign({}, state.items[idx], data);
     } else {
       data.id = uid();
+      data.photoIds = [];
+      data.heroPhotoId = null;
       state.items.push(data);
     }
 
@@ -1337,6 +1541,70 @@
   document.getElementById("categoriesCloseBtn").addEventListener("click", function () { categoriesSheet.hidden = true; });
   categoriesSheet.addEventListener("click", function (e) { if (e.target === categoriesSheet) categoriesSheet.hidden = true; });
 
+  // ---------- manage locations sheet ----------
+
+  var locationsSheet = document.getElementById("locationsSheet");
+  var locationManageList = document.getElementById("locationManageList");
+
+  function renderLocationManageList() {
+    if (!state.locations.length) {
+      locationManageList.innerHTML = '<li class="batch-empty">No locations yet — one is created automatically the first time you type a name into a batch\'s Location field.</li>';
+      return;
+    }
+    locationManageList.innerHTML = allLocations().map(function (loc) {
+      var batchCount = 0;
+      state.items.forEach(function (it) { it.batches.forEach(function (b) { if (b.locationId === loc.id) batchCount++; }); });
+      return '<li class="category-row" data-id="' + loc.id + '">' +
+        '<div class="category-row-main">' +
+          '<span class="category-name">' + escapeHtml(loc.name) + '</span>' +
+          '<span class="category-count">' + batchCount + " batch" + (batchCount === 1 ? "" : "es") + " · " + loc.photoIds.length + " photo" + (loc.photoIds.length === 1 ? "" : "s") + '</span>' +
+          '<button type="button" class="icon-btn loc-rename" data-id="' + loc.id + '" title="Rename">✎</button>' +
+          '<button type="button" class="icon-btn loc-delete" data-id="' + loc.id + '" title="Delete">🗑</button>' +
+        '</div>' +
+      '</li>';
+    }).join("");
+  }
+
+  locationManageList.addEventListener("click", function (e) {
+    var renameBtn = e.target.closest(".loc-rename");
+    if (renameBtn) {
+      var loc = getLocation(renameBtn.dataset.id); if (!loc) return;
+      var name = prompt("Rename location", loc.name);
+      if (name && name.trim()) { loc.name = name.trim(); loc.updatedAt = new Date().toISOString(); saveLocations(); renderLocationManageList(); render(); }
+      return;
+    }
+    var delBtn = e.target.closest(".loc-delete");
+    if (delBtn) {
+      var id = delBtn.dataset.id; var loc2 = getLocation(id); if (!loc2) return;
+      var itemsSnapshot = state.items.map(function (it) { return Object.assign({}, it, { batches: it.batches.map(function (b) { return Object.assign({}, b); }) }); });
+      var locationsSnapshot = state.locations.map(function (l) { return Object.assign({}, l); });
+      var affectedCount = 0;
+      state.items.forEach(function (it) { it.batches.forEach(function (b) { if (b.locationId === id) { b.locationId = null; affectedCount++; } }); });
+      state.locations = state.locations.filter(function (l) { return l.id !== id; });
+      if (state.activeLocation === id) state.activeLocation = "all";
+      saveItems(); saveLocations();
+      renderLocationManageList(); render();
+      showUndoToast(
+        'Deleted location "' + loc2.name + '"' + (affectedCount ? " (" + affectedCount + " batch(es) unassigned)" : "") + ".",
+        function () {
+          state.items = itemsSnapshot;
+          state.locations = locationsSnapshot;
+          saveItems(); saveLocations();
+          renderLocationManageList(); render();
+        }
+      );
+      return;
+    }
+  });
+
+  document.getElementById("manageLocationsBtn").addEventListener("click", function () {
+    settingsSheet.hidden = true;
+    renderLocationManageList();
+    locationsSheet.hidden = false;
+  });
+  document.getElementById("locationsCloseBtn").addEventListener("click", function () { locationsSheet.hidden = true; });
+  locationsSheet.addEventListener("click", function (e) { if (e.target === locationsSheet) locationsSheet.hidden = true; });
+
   // ---------- thresholds sheet ----------
 
   var thresholdsSheet = document.getElementById("thresholdsSheet");
@@ -1389,12 +1657,13 @@
       ["Items tracked", state.items.length],
       ["Total units in stock", formatQty(totalQuantity)],
       ["Categories", state.categories.length + (subCount ? " (" + subCount + " subcategories)" : "")],
+      ["Locations", state.locations.length],
       ["Expiring within " + state.settings.soonDays + " days", expiringSoon],
       ["Already past date", expired],
       ["Depleted (≤ " + formatQty(state.settings.depletionThreshold) + ")", depleted],
       ["Withdrawals logged", state.history.length],
       ["Units withdrawn all-time", formatQty(totalWithdrawn)],
-      ["Storage used (approx.)", kb + " KB"]
+      ["Storage used (approx., excl. photos)", kb + " KB"]
     ];
 
     var html = rows.map(function (r) {
@@ -1432,10 +1701,6 @@
     return existing.concat(added);
   }
 
-  // For items specifically: when the same id exists on both sides, keep
-  // whichever has the more recent updatedAt, rather than silently dropping
-  // the incoming edit. This is what makes "Merge" safe for two people
-  // editing the same shared item on different devices.
   function mergeItemsLWW(existing, incoming) {
     var map = {};
     existing.forEach(function (it) { map[it.id] = it; });
@@ -1471,12 +1736,13 @@
         var importedItems = Array.isArray(parsed) ? parsed : parsed.items;
         var importedHistory = Array.isArray(parsed) ? [] : (parsed.history || []);
         var importedCategories = Array.isArray(parsed) ? null : (parsed.categories || null);
+        var importedLocations = Array.isArray(parsed) ? null : (parsed.locations || null);
         var importedSettings = Array.isArray(parsed) ? null : (parsed.settings || null);
         var exportedBy = Array.isArray(parsed) ? "" : (parsed.exportedBy || "");
         var exportedAt = Array.isArray(parsed) ? null : (parsed.exportedAt || null);
         if (!Array.isArray(importedItems)) throw new Error("File is not a valid backup");
 
-        state.pendingImport = { items: importedItems, history: importedHistory, categories: importedCategories, settings: importedSettings };
+        state.pendingImport = { items: importedItems, history: importedHistory, categories: importedCategories, locations: importedLocations, settings: importedSettings };
 
         var existingIds = {};
         state.items.forEach(function (it) { existingIds[it.id] = true; });
@@ -1490,7 +1756,7 @@
         document.getElementById("importSummaryLine").textContent =
           sourceLine + "Contains " + importedItems.length + " item(s) — " + newCount + " new to this device, " +
           overlapCount + " already tracked here (the most recently edited version of each is kept on Merge) — " +
-          "and " + importedHistory.length + " withdrawal record(s).";
+          "and " + importedHistory.length + " withdrawal record(s). Photos aren't included in backups, so imported items keep whatever photos they already have on this device.";
 
         document.querySelectorAll("#importItemsSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "merge"); });
         document.querySelectorAll("#importHistorySegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s.dataset.mode === "merge"); });
@@ -1518,8 +1784,6 @@
     state.items = itemsMode === "replace" ? state.pendingImport.items : mergeItemsLWW(state.items, state.pendingImport.items);
     state.history = historyMode === "replace" ? state.pendingImport.history : mergeById(state.history, state.pendingImport.history);
 
-    // Categories always reconcile additively, including subcategories —
-    // never silently dropped just because the parent category already exists.
     if (state.pendingImport.categories) {
       state.pendingImport.categories.forEach(function (ic) {
         var existingCat = getCategory(ic.id);
@@ -1532,9 +1796,12 @@
       });
     }
 
-    // Settings (thresholds etc.) only come along on a full Replace — a
-    // Merge shouldn't silently change your thresholds to someone else's.
-    // Your device name is never overwritten by an import either way.
+    if (state.pendingImport.locations) {
+      state.pendingImport.locations.forEach(function (il) {
+        if (!getLocation(il.id)) state.locations.push(il);
+      });
+    }
+
     if (itemsMode === "replace" && state.pendingImport.settings) {
       var myDeviceName = state.settings.deviceName;
       state.settings = Object.assign({}, state.pendingImport.settings, { deviceName: myDeviceName });
@@ -1543,7 +1810,7 @@
     state.settings.lastImportAt = new Date().toISOString();
 
     migrateItems(state.items);
-    saveItems(); saveHistory(); saveCategories(); saveSettings();
+    saveItems(); saveHistory(); saveCategories(); saveLocations(); saveSettings();
 
     state.pendingImport = null;
     importOptionsSheet.hidden = true;
@@ -1556,11 +1823,11 @@
   var auditListEl = document.getElementById("auditList");
   var auditMissingListEl = document.getElementById("auditMissingList");
 
-  function getBatchesAtLocation(location) {
+  function getBatchesAtLocation(locationId) {
     var out = [];
     state.items.forEach(function (item) {
       item.batches.forEach(function (b) {
-        if (b.location === location) out.push({ item: item, batch: b });
+        if (b.locationId === locationId) out.push({ item: item, batch: b });
       });
     });
     return out;
@@ -1568,13 +1835,13 @@
 
   function renderAuditLocationChips() {
     var container = document.getElementById("auditLocationChips");
-    var locs = allKnownLocations();
+    var locs = allLocations();
     if (!locs.length) {
       container.innerHTML = '<p class="settings-desc">No locations recorded yet — add a location to a batch first.</p>';
       return;
     }
     container.innerHTML = locs.map(function (loc) {
-      return '<button type="button" class="chip" data-location="' + escapeHtml(loc) + '">' + escapeHtml(loc) + '</button>';
+      return '<button type="button" class="chip" data-location="' + loc.id + '">' + escapeHtml(loc.name) + '</button>';
     }).join("");
   }
 
@@ -1604,7 +1871,7 @@
     var entries = getBatchesAtLocation(state.auditLocation);
     var checkedCount = entries.filter(function (e) { return state.auditChecked[e.batch.id]; }).length;
     document.getElementById("auditProgressLine").textContent =
-      'Checking "' + state.auditLocation + '" — ' + checkedCount + " of " + entries.length + " found so far.";
+      'Checking "' + (locationName(state.auditLocation) || "") + '" — ' + checkedCount + " of " + entries.length + " found so far.";
 
     auditListEl.innerHTML = entries.map(function (e) {
       var checked = !!state.auditChecked[e.batch.id];
@@ -1621,13 +1888,113 @@
     renderAuditMissing(entries);
   }
 
-  function startAudit(location) {
-    state.auditLocation = location;
+  // ---------- location audit: photo header + update-photos flow ----------
+
+  function renderAuditLocationHeader() {
+    var loc = getLocation(state.auditLocation);
+    var previewEl = document.getElementById("auditLocationPhotoPreview");
+    var ageLine = document.getElementById("auditPhotoAgeLine");
+    if (state.auditHeaderPhotoUrl) { URL.revokeObjectURL(state.auditHeaderPhotoUrl); state.auditHeaderPhotoUrl = null; }
+    if (!loc) { previewEl.hidden = true; ageLine.textContent = ""; return; }
+
+    if (loc.heroPhotoId) {
+      idbGetPhoto(loc.heroPhotoId).then(function (rec) {
+        if (rec) {
+          var url = URL.createObjectURL(rec.blob);
+          state.auditHeaderPhotoUrl = url;
+          previewEl.src = url;
+          previewEl.hidden = false;
+        } else {
+          previewEl.hidden = true;
+        }
+      });
+    } else {
+      previewEl.hidden = true;
+    }
+    ageLine.textContent = loc.photosUpdatedAt
+      ? "Last photographed " + relativeTime(loc.photosUpdatedAt) + " (" + loc.photoIds.length + " photo" + (loc.photoIds.length === 1 ? "" : "s") + ")."
+      : "No photos yet for this location.";
+  }
+
+  function renderAuditPhotoDraft() {
+    document.getElementById("auditPhotoUpdateCount").textContent = "Photos to save: " + state.auditPhotoDraft.length;
+    document.getElementById("auditPhotoUpdateThumbs").innerHTML = state.auditPhotoDraftUrls.map(function (url, i) {
+      return '<div class="photo-thumb"><img src="' + url + '" alt="">' +
+        '<button type="button" class="icon-btn audit-draft-remove" data-index="' + i + '" title="Remove">🗑</button></div>';
+    }).join("");
+  }
+
+  document.getElementById("auditUpdatePhotosBtn").addEventListener("click", function () {
+    state.auditPhotoDraft = [];
+    state.auditPhotoDraftUrls.forEach(function (u) { URL.revokeObjectURL(u); });
+    state.auditPhotoDraftUrls = [];
+    renderAuditPhotoDraft();
+    document.getElementById("auditPhotoUpdatePanel").hidden = false;
+  });
+
+  document.getElementById("auditAddPhotoInput").addEventListener("change", function (e) {
+    var file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    compressImageFile(file, 1600, 0.75).then(function (blob) {
+      state.auditPhotoDraft.push(blob);
+      state.auditPhotoDraftUrls.push(URL.createObjectURL(blob));
+      renderAuditPhotoDraft();
+    }).catch(function (err) { alert("Couldn't process that photo: " + err.message); });
+  });
+
+  document.getElementById("auditPhotoUpdateThumbs").addEventListener("click", function (e) {
+    var btn = e.target.closest(".audit-draft-remove");
+    if (!btn) return;
+    var i = Number(btn.dataset.index);
+    URL.revokeObjectURL(state.auditPhotoDraftUrls[i]);
+    state.auditPhotoDraft.splice(i, 1);
+    state.auditPhotoDraftUrls.splice(i, 1);
+    renderAuditPhotoDraft();
+  });
+
+  function closeAuditPhotoPanel() {
+    state.auditPhotoDraftUrls.forEach(function (u) { URL.revokeObjectURL(u); });
+    state.auditPhotoDraft = [];
+    state.auditPhotoDraftUrls = [];
+    document.getElementById("auditPhotoUpdatePanel").hidden = true;
+  }
+  document.getElementById("auditPhotoCancelBtn").addEventListener("click", closeAuditPhotoPanel);
+
+  document.getElementById("auditPhotoSaveBtn").addEventListener("click", function () {
+    var loc = getLocation(state.auditLocation);
+    if (!loc) return;
+    if (!state.auditPhotoDraft.length) { alert("Add at least one photo, or Cancel."); return; }
+
+    var oldIds = loc.photoIds.slice();
+    Promise.all(oldIds.map(function (id) { return idbDeletePhoto(id); }))
+      .then(function () {
+        return Promise.all(state.auditPhotoDraft.map(function (blob) {
+          var id = uid();
+          return idbPutPhoto({ id: id, blob: blob, createdAt: new Date().toISOString() }).then(function () { return id; });
+        }));
+      })
+      .then(function (newIds) {
+        loc.photoIds = newIds;
+        loc.heroPhotoId = newIds[0] || null;
+        loc.photosUpdatedAt = new Date().toISOString();
+        loc.updatedAt = loc.photosUpdatedAt;
+        saveLocations();
+        closeAuditPhotoPanel();
+        renderAuditLocationHeader();
+        renderLocationManageList();
+      })
+      .catch(function (err) { alert("Couldn't save photos: " + err.message); });
+  });
+
+  function startAudit(locationId) {
+    state.auditLocation = locationId;
     state.auditChecked = {};
     document.getElementById("auditPickLocation").hidden = true;
     document.getElementById("auditChecklist").hidden = false;
     renderAuditItemSuggestions();
     renderAuditChecklist();
+    renderAuditLocationHeader();
   }
 
   function openLocationAudit() {
@@ -1636,6 +2003,7 @@
     state.auditChecked = {};
     document.getElementById("auditPickLocation").hidden = false;
     document.getElementById("auditChecklist").hidden = true;
+    closeAuditPhotoPanel();
     renderAuditLocationChips();
     locationAuditSheet.hidden = false;
   }
@@ -1661,7 +2029,7 @@
       return;
     }
     openBatchSheet(null, "direct", item.id);
-    document.getElementById("batchLocation").value = state.auditLocation;
+    document.getElementById("batchLocation").value = locationName(state.auditLocation) || "";
     document.getElementById("auditAddItemInput").value = "";
   });
 
@@ -1687,7 +2055,7 @@
       if (item2) {
         var b2 = item2.batches.find(function (x) { return x.id === moveBtn.dataset.batchId; });
         if (b2) {
-          b2.location = newLoc.trim();
+          b2.locationId = resolveLocationByName(newLoc.trim());
           item2.updatedAt = new Date().toISOString();
           saveItems();
           render();
@@ -1706,7 +2074,6 @@
 
   var shoppingListSheet = document.getElementById("shoppingListSheet");
   var shoppingListResultsEl = document.getElementById("shoppingListResults");
-  state.shoppingListResults = [];
 
   function generateShoppingList() {
     var includeDepleted = document.getElementById("slIncludeDepleted").checked;
@@ -1952,8 +2319,9 @@
   document.getElementById("scanMultiAddBtn").addEventListener("click", function () {
     var code = state.scanMultiCode;
     var qty = roundQty(Number(document.getElementById("scanMultiQty").value)) || 1;
-    var location = document.getElementById("scanMultiLocation").value.trim() || null;
-    if (location) state.scanLastLocation = location;
+    var typedLocationName = document.getElementById("scanMultiLocation").value.trim();
+    if (typedLocationName) state.scanLastLocation = typedLocationName;
+    var locationId = resolveLocationByName(typedLocationName);
 
     var item = state.scanMultiMatchedItemId ? state.items.find(function (it) { return it.id === state.scanMultiMatchedItemId; }) : null;
     if (!item) {
@@ -1967,13 +2335,13 @@
         item = {
           id: uid(), name: typedName, categoryId: defaultCatId, subcategoryId: null, unit: "",
           reorderThreshold: null, openShelfLifeDays: null, barcodes: [code], batches: [], notes: "",
-          updatedAt: new Date().toISOString()
+          photoIds: [], heroPhotoId: null, updatedAt: new Date().toISOString()
         };
         state.items.push(item);
       }
     }
 
-    item.batches.push({ id: uid(), quantity: qty, expiry: null, expiryType: null, openDate: null, location: location });
+    item.batches.push({ id: uid(), quantity: qty, expiry: null, expiryType: null, openDate: null, locationId: locationId });
     item.updatedAt = new Date().toISOString();
     saveItems();
     render();
@@ -2116,7 +2484,7 @@
     var backup = {
       exportedAt: state.settings.lastExportAt,
       exportedBy: state.settings.deviceName || "",
-      items: state.items, history: state.history, categories: state.categories, settings: state.settings
+      items: state.items, history: state.history, categories: state.categories, locations: state.locations, settings: state.settings
     };
     var blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     var url = URL.createObjectURL(blob);
@@ -2145,13 +2513,9 @@
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
       navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(function (reg) {
-        // Every time the app opens, explicitly ask the browser to check the
-        // network for a newer sw.js, rather than waiting for it to notice on its own.
         reg.update();
       }).catch(function (err) { console.warn("Service worker registration failed", err); });
 
-      // If a new service worker takes control (because a newer version was found
-      // and activated), reload once so the fresh files are actually used.
       var reloaded = false;
       navigator.serviceWorker.addEventListener("controllerchange", function () {
         if (reloaded) return;
@@ -2165,7 +2529,7 @@
 
   function boot() {
     return migrateFromLocalStorage().then(function () {
-      return Promise.all([idbGetAll("items"), idbGetAll("history"), idbGetAll("categories"), idbGetKV("settings", null)]);
+      return Promise.all([idbGetAll("items"), idbGetAll("history"), idbGetAll("categories"), idbGetKV("settings", null), idbGetAll("locations")]);
     }).then(function (results) {
       state.items = results[0];
       state.history = results[1];
@@ -2175,12 +2539,17 @@
       if (state.settings.deviceName === undefined) state.settings.deviceName = "";
       if (state.settings.lastExportAt === undefined) state.settings.lastExportAt = null;
       if (state.settings.lastImportAt === undefined) state.settings.lastImportAt = null;
+      state.locations = results[4] || [];
 
       var itemsChanged = migrateItems(state.items);
       var historyChanged = migrateHistory(state.history);
-      if (itemsChanged) saveItems();
+      var locChanged1 = migrateBatchLocations(state.items, state.locations);
+      var locChanged2 = normalizeLocations(state.locations);
+
+      if (itemsChanged || locChanged1) saveItems();
       if (historyChanged) saveHistory();
       if (!catsFromDb.length) saveCategories();
+      if (locChanged1 || locChanged2) saveLocations();
 
       render();
     }).catch(function (err) {

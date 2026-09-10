@@ -54,6 +54,11 @@
     <div class="sheet-handle"></div>
     <h2 id="viewItemName"></h2>
     <p class="settings-desc" id="viewItemMeta"></p>
+
+    <div class="photo-gallery" id="viewPhotoGallery"></div>
+    <div class="photo-thumbs" id="viewPhotoThumbs"></div>
+    <label class="btn-secondary file-btn">Add photo<input type="file" id="viewAddPhotoInput" accept="image/*" hidden></label>
+
     <ul id="viewBatchList" class="batch-list"></ul>
     <button type="button" id="viewAddBatchBtn" class="btn-secondary">Add batch</button>
 
@@ -278,6 +283,19 @@
   </div>
 </div>
 
+<!-- Locations sheet -->
+<div id="locationsSheet" class="sheet-backdrop" hidden>
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <h2>Manage locations</h2>
+    <p class="settings-desc">Rename or remove locations. A new one is created automatically the first time you type a name into a batch's Location field.</p>
+
+    <ul id="locationManageList" class="category-manage-list"></ul>
+
+    <button id="locationsCloseBtn" class="btn-ghost">Close</button>
+  </div>
+</div>
+
 <!-- Thresholds sheet -->
 <div id="thresholdsSheet" class="sheet-backdrop" hidden>
   <form id="thresholdsForm" class="sheet">
@@ -345,6 +363,21 @@
 
     <div id="auditChecklist" hidden>
       <p class="settings-desc" id="auditProgressLine"></p>
+
+      <img id="auditLocationPhotoPreview" class="scan-video" style="max-height:160px;object-fit:cover;border-radius:10px;" hidden alt="">
+      <p class="settings-desc" id="auditPhotoAgeLine"></p>
+      <button type="button" id="auditUpdatePhotosBtn" class="btn-secondary">Update photos</button>
+
+      <div id="auditPhotoUpdatePanel" hidden>
+        <p class="settings-desc" id="auditPhotoUpdateCount">Photos to save: 0</p>
+        <div class="photo-thumbs" id="auditPhotoUpdateThumbs"></div>
+        <label class="btn-secondary file-btn">Add photo<input type="file" id="auditAddPhotoInput" accept="image/*" hidden></label>
+        <div class="sheet-actions">
+          <button type="button" id="auditPhotoCancelBtn" class="btn-ghost">Cancel</button>
+          <button type="button" id="auditPhotoSaveBtn" class="btn-primary">Save (replaces all existing photos)</button>
+        </div>
+      </div>
+
       <ul id="auditList" class="batch-list"></ul>
 
       <div class="add-category-form">
@@ -402,6 +435,7 @@
     </label>
     <div class="settings-actions">
       <button id="manageCategoriesBtn" class="btn-secondary">Manage categories</button>
+      <button id="manageLocationsBtn" class="btn-secondary">Manage locations</button>
       <button id="generateShoppingListBtn" class="btn-secondary">Generate shopping list</button>
       <button id="startAuditBtn" class="btn-secondary">Location check</button>
       <button id="adjustThresholdsBtn" class="btn-secondary">Adjust thresholds</button>

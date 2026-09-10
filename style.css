@@ -220,6 +220,9 @@ body {
   box-shadow: 0 4px 14px rgba(0,0,0,0.35);
   font-size: 14px;
 }
+.undo-toast[hidden] {
+  display: none;
+}
 .undo-toast button {
   background: none;
   border: none;
@@ -229,6 +232,55 @@ body {
   cursor: pointer;
   flex: 0 0 auto;
 }
+
+.photo-gallery {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  border-radius: 10px;
+  background: #000;
+  margin: 10px 0;
+}
+.photo-gallery:empty { display: none; margin: 0; }
+.photo-gallery img.photo-slide {
+  width: 100%;
+  flex: 0 0 100%;
+  scroll-snap-align: start;
+  object-fit: contain;
+  max-height: 260px;
+  background: #000;
+}
+
+.photo-thumbs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 10px;
+}
+.photo-thumbs:empty { padding: 0; }
+.photo-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--paper-dim, #e7e5df);
+}
+.photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-thumb .icon-btn {
+  position: absolute;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  border-radius: 6px;
+  padding: 1px 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.photo-thumb .photo-hero-toggle, .photo-thumb .audit-draft-remove { top: 2px; left: 2px; }
+.photo-thumb .photo-delete { top: 2px; right: 2px; }
+
+.file-btn { display: inline-block; text-align: center; cursor: pointer; }
 
 .sheet-backdrop {
   position: fixed;
