@@ -1,4 +1,4 @@
-var RELEASE = "18";
+var RELEASE = "19";
 var CACHE_NAME = "depot-cache-v" + RELEASE;
 var SCOPE = new URL("./", self.location.href);
 var FILES_TO_CACHE = [

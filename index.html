@@ -4,10 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#F2F1ED">
-<meta name="depot-build" content="v18">
+<meta name="depot-build" content="v19">
 <title>Depot</title>
 <link rel="manifest" href="manifest.json">
-<link rel="stylesheet" href="style.css?v=18">
+<script>
+// Apply the device preference before the first paint.
+try {
+  var depotAppearance = localStorage.getItem("depot.appearance.v1") || "system";
+  var depotDark = depotAppearance === "dark" || (depotAppearance !== "light" && depotAppearance !== "dark" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = depotDark ? "dark" : "light";
+  document.querySelector('meta[name="theme-color"]').content = depotDark ? "#171C18" : "#F2F1ED";
+} catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css?v=19">
 </head>
 <body>
 
@@ -132,8 +141,7 @@
     </label>
 
     <label>Unit <span class="hint">(optional)</span>
-      <input type="text" id="fieldUnit" list="unitSuggestions" placeholder="e.g. cans, boxes">
-      <datalist id="unitSuggestions"></datalist>
+      <input type="text" id="fieldUnit" autocomplete="off" placeholder="e.g. cans, boxes">
     </label>
 
     <div class="field-row">
@@ -449,6 +457,6 @@
   </div>
 </div>
 
-<script src="app.js?v=18"></script>
+<script src="app.js?v=19"></script>
 </body>
 </html>

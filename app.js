@@ -5,7 +5,7 @@
   var LS_HISTORY_KEY = "depot.history.v1";
   var LS_CATEGORIES_KEY = "depot.categories.v1";
   var LS_SETTINGS_KEY = "depot.settings.v1";
-  var APP_VERSION = "v18";
+  var APP_VERSION = "v19";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
 
   function showAppError(message, error) {
@@ -15,7 +15,7 @@
       banner = document.createElement("div");
       banner.id = "appErrorNotice";
       banner.setAttribute("role", "alert");
-      banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:100;padding:16px;background:#fff;color:#23261f;border-bottom:2px solid #b23a2e";
+      banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:100;padding:16px;background:var(--paper-raised);color:var(--ink);border-bottom:2px solid var(--warn-urgent)";
       var text = document.createElement("p"); text.id = "appErrorText"; banner.appendChild(text);
       var dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.textContent = "Dismiss";
       dismiss.onclick = function () { banner.hidden = true; }; banner.appendChild(dismiss);
@@ -31,12 +31,22 @@
   // touching inventory, photos or any other persisted data.
   function ensureCurrentControls() {
     var unitInput = document.getElementById("fieldUnit");
-    if (unitInput && !document.getElementById("unitSuggestions")) {
-      var list = document.createElement("datalist"); list.id = "unitSuggestions";
-      unitInput.parentNode.appendChild(list);
+    if (unitInput) { unitInput.removeAttribute("list"); unitInput.setAttribute("autocomplete", "off"); }
+    var oldUnitList = document.getElementById("unitSuggestions");
+    if (oldUnitList) oldUnitList.remove();
+    var controls = document.querySelector(".controls");
+    if (!controls.querySelector(".filter-row")) {
+      var row = document.createElement("div"); row.className = "filter-row";
+      controls.insertBefore(row, document.getElementById("categoryChips"));
+      ["categoryChips", "subCategoryChips", "locationChips"].forEach(function (id) { row.appendChild(document.getElementById(id)); });
     }
-    if (unitInput) unitInput.setAttribute("list", "unitSuggestions");
-
+    ["categoryChips", "subCategoryChips", "locationChips"].forEach(function (id) { document.getElementById(id).className = "filter-control"; });
+    if (!controls.querySelector(".stock-filters")) {
+      var toggles = document.createElement("div"); toggles.className = "stock-filters";
+      var soon = document.getElementById("soonToggle").closest("label");
+      controls.insertBefore(toggles, soon);
+      toggles.appendChild(soon); toggles.appendChild(document.getElementById("depletedToggle").closest("label"));
+    }
   }
   ensureCurrentControls();
 
@@ -94,6 +104,38 @@
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+
+  var APPEARANCE_KEY = "depot.appearance.v1";
+  var appearance = "system";
+  try { appearance = localStorage.getItem(APPEARANCE_KEY) || "system"; } catch (err) {}
+  var systemAppearance = window.matchMedia("(prefers-color-scheme: dark)");
+  function applyAppearance() {
+    if (["system", "light", "dark"].indexOf(appearance) === -1) appearance = "system";
+    var dark = appearance === "dark" || (appearance === "system" && systemAppearance.matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = dark ? "#171C18" : "#F2F1ED";
+    var select = document.getElementById("appearanceSelect"); if (select) select.value = appearance;
+  }
+  function renderAppearanceControl() {
+    var select = document.getElementById("appearanceSelect");
+    if (!select) {
+      var label = document.createElement("label"); label.textContent = "Appearance";
+      select = document.createElement("select"); select.id = "appearanceSelect";
+      [["system", "Use system setting"], ["light", "Light"], ["dark", "Dark"]].forEach(function (choice) {
+        var option = document.createElement("option"); option.value = choice[0]; option.textContent = choice[1]; select.appendChild(option);
+      });
+      label.appendChild(select); document.querySelector("#settingsSheet .settings-actions").prepend(label);
+      select.addEventListener("change", function () {
+        appearance = select.value; applyAppearance();
+        try { localStorage.setItem(APPEARANCE_KEY, appearance); } catch (err) { showAppError("Appearance changed, but the preference could not be saved", err); }
+      });
+    }
+    applyAppearance();
+  }
+  systemAppearance.addEventListener("change", function () { if (appearance === "system") applyAppearance(); });
+  window.addEventListener("storage", function (e) { if (e.key === APPEARANCE_KEY) { appearance = e.newValue || "system"; applyAppearance(); } });
+  applyAppearance();
 
   // ---------- undo toast ----------
 
@@ -451,10 +493,9 @@
     locationPickers.forEach(function (picker) { picker.close(); });
   }
 
-  function renderLocationSuggestions() {
-    var input = document.getElementById("batchLocation");
-    if (input.dataset.locationPicker) { closeLocationSuggestions(); return; }
-    input.dataset.locationPicker = "true";
+  function ensureSuggestionPicker(input, getOptions, label) {
+    if (input.dataset.suggestionPicker) { closeLocationSuggestions(); return; }
+    input.dataset.suggestionPicker = "true";
     input.removeAttribute("list");
     input.setAttribute("autocomplete", "off");
     input.setAttribute("role", "combobox");
@@ -463,8 +504,9 @@
     var wrapper = document.createElement("div"); wrapper.className = "location-picker";
     input.parentNode.insertBefore(wrapper, input); wrapper.appendChild(input);
     var toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "location-toggle";
-    toggle.textContent = "▾"; toggle.setAttribute("aria-label", "Show saved locations");
-    var list = document.createElement("div"); list.className = "location-options"; list.id = "batchLocationOptions";
+    toggle.textContent = "▾"; toggle.setAttribute("aria-label", "Show saved " + label);
+    var list = document.createElement("div"); list.className = "location-options"; list.id = input.id + "Options";
+    list.setAttribute("aria-label", "Saved " + label);
     list.setAttribute("role", "listbox"); list.hidden = true;
     input.setAttribute("aria-controls", list.id); toggle.setAttribute("aria-controls", list.id);
     wrapper.appendChild(toggle); wrapper.appendChild(list);
@@ -472,7 +514,7 @@
     function close() { list.hidden = true; active = -1; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); }
     function show(all) {
       var query = input.value.trim().toLowerCase();
-      var matches = allLocations().filter(function (loc) { return all || (query && loc.name.toLowerCase().indexOf(query) !== -1); });
+      var matches = getOptions().filter(function (loc) { return all || (query && loc.name.toLowerCase().indexOf(query) !== -1); });
       list.replaceChildren(); active = -1; input.removeAttribute("aria-activedescendant");
       if (!matches.length) { close(); return; }
       matches.forEach(function (loc, index) {
@@ -480,7 +522,15 @@
         option.id = list.id + "-" + index; option.setAttribute("role", "option"); option.setAttribute("aria-selected", "false");
         option.textContent = loc.name;
         option.addEventListener("pointerdown", function (e) { e.preventDefault(); });
-        option.addEventListener("click", function (e) { e.preventDefault(); input.value = loc.name; close(); input.focus(); input.dispatchEvent(new Event("change", { bubbles: true })); });
+        option.addEventListener("click", function (e) {
+          e.preventDefault();
+          var sheet = input.closest(".sheet-backdrop");
+          if (list.hidden || !input.isConnected || (sheet && sheet.hidden)) return;
+          input.value = loc.name; close(); input.focus();
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          close();
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        });
         list.appendChild(option);
       });
       var rect = input.getBoundingClientRect();
@@ -509,8 +559,19 @@
     wrapper.addEventListener("focusout", function (e) { if (!wrapper.contains(e.relatedTarget)) close(); });
     document.addEventListener("pointerdown", function (e) { if (!wrapper.contains(e.target)) close(); });
     if (window.visualViewport) window.visualViewport.addEventListener("resize", close);
+    var sheet = input.closest(".sheet-backdrop");
+    if (sheet) new MutationObserver(function () { if (sheet.hidden) close(); }).observe(sheet, { attributes: true, attributeFilter: ["hidden"] });
+    if (input.form) input.form.addEventListener("reset", close);
     locationPickers.push({ close: close });
   }
+
+  function renderLocationSuggestions() {
+    ensureSuggestionPicker(document.getElementById("batchLocation"), allLocations, "locations");
+    closeLocationSuggestions();
+  }
+
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") closeLocationSuggestions(); });
+  window.addEventListener("pagehide", closeLocationSuggestions);
 
   // ---------- unit records ----------
 
@@ -540,9 +601,10 @@
 
   function renderUnitSuggestions() {
     ensureCurrentControls();
-    document.getElementById("unitSuggestions").innerHTML = state.units.slice()
-      .sort(function (a, b) { return a.name.localeCompare(b.name); })
-      .map(function (u) { return '<option value="' + escapeHtml(u.name) + '"></option>'; }).join("");
+    ensureSuggestionPicker(document.getElementById("fieldUnit"), function () {
+      return state.units.slice().sort(function (a, b) { return a.name.localeCompare(b.name); });
+    }, "units");
+    closeLocationSuggestions();
   }
 
   // ---------- batch / expiry helpers ----------
@@ -706,48 +768,75 @@
       });
   }
 
-  function renderCategoryFilters() {
-    var container = document.getElementById("categoryChips");
-    var hasUncategorized = state.items.some(function (it) { return !getCategory(it.categoryId); });
+  function closeFilterMenus() {
+    document.querySelectorAll(".filter-options").forEach(function (menu) { menu.hidden = true; });
+    document.querySelectorAll(".filter-trigger").forEach(function (button) { button.setAttribute("aria-expanded", "false"); });
+  }
 
-    var html = '<button class="chip' + (state.activeCategory === "all" ? " is-active" : "") + '" data-category="all">All</button>';
-    state.categories.forEach(function (cat) {
-      html += '<button class="chip' + (state.activeCategory === cat.id ? " is-active" : "") + '" data-category="' + cat.id + '">' +
-        '<span class="dot" style="background:' + cat.color + '"></span>' + escapeHtml(cat.name) + '</button>';
+  function renderFilterMenu(container, title, choices, selected, attribute) {
+    container.replaceChildren();
+    var choice = choices.find(function (c) { return c.id === selected; });
+    var trigger = document.createElement("button"); trigger.type = "button";
+    trigger.id = container.id + "Trigger"; trigger.className = "filter-trigger";
+    trigger.classList.toggle("is-active", selected !== "all");
+    trigger.setAttribute("aria-haspopup", "listbox"); trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-label", title + ": " + (choice ? choice.name : "All"));
+    trigger.title = title + ": " + (choice ? choice.name : "All");
+    var label = document.createElement("span"); label.textContent = selected === "all" ? title : (choice ? choice.name : title);
+    var arrow = document.createElement("span"); arrow.textContent = "▾"; arrow.setAttribute("aria-hidden", "true");
+    trigger.appendChild(label); trigger.appendChild(arrow);
+    var menu = document.createElement("div"); menu.className = "filter-options"; menu.id = container.id + "Menu"; menu.hidden = true;
+    menu.setAttribute("role", "listbox"); menu.setAttribute("aria-label", title);
+    trigger.setAttribute("aria-controls", menu.id);
+    choices.forEach(function (c) {
+      var option = document.createElement("button"); option.type = "button"; option.className = "chip filter-option";
+      option.setAttribute("data-" + attribute, c.id); option.setAttribute("role", "option"); option.setAttribute("aria-selected", String(c.id === selected));
+      option.tabIndex = -1; option.textContent = c.name;
+      option.addEventListener("click", function () { closeFilterMenus(); queueMicrotask(function () { var next = document.getElementById(trigger.id); if (next) next.focus(); }); });
+      menu.appendChild(option);
     });
-    if (hasUncategorized) {
-      html += '<button class="chip' + (state.activeCategory === "uncategorized" ? " is-active" : "") + '" data-category="uncategorized">' +
-        '<span class="dot"></span>Uncategorized</button>';
+    function open() {
+      closeFilterMenus(); closeLocationSuggestions(); menu.hidden = false; trigger.setAttribute("aria-expanded", "true");
+      var selectedOption = menu.querySelector('[aria-selected="true"]') || menu.firstElementChild;
+      if (selectedOption) selectedOption.focus();
     }
-    container.innerHTML = html;
+    trigger.addEventListener("click", function () { if (menu.hidden) open(); else closeFilterMenus(); });
+    trigger.addEventListener("keydown", function (e) { if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); open(); } });
+    menu.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { e.preventDefault(); closeFilterMenus(); trigger.focus(); }
+      else if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End") {
+        e.preventDefault(); var options = Array.from(menu.children), current = options.indexOf(document.activeElement);
+        var next = e.key === "Home" ? 0 : e.key === "End" ? options.length - 1 : (current + (e.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+        options[next].focus();
+      }
+    });
+    container.onfocusout = function (e) { if (!container.contains(e.relatedTarget)) closeFilterMenus(); };
+    container.appendChild(trigger); container.appendChild(menu);
+  }
+  document.addEventListener("pointerdown", function (e) { if (!e.target.closest(".filter-control")) closeFilterMenus(); });
+
+  function renderCategoryFilters() {
+    var choices = [{ id: "all", name: "All categories" }].concat(state.categories.map(function (cat) { return { id: cat.id, name: cat.name }; }));
+    if (state.items.some(function (item) { return !getCategory(item.categoryId); })) choices.push({ id: "uncategorized", name: "Uncategorized" });
+    if (!choices.some(function (c) { return c.id === state.activeCategory; })) { state.activeCategory = "all"; state.activeSubCategory = "all"; }
+    renderFilterMenu(document.getElementById("categoryChips"), "Category", choices, state.activeCategory, "category");
   }
 
   function renderSubCategoryFilters() {
     var container = document.getElementById("subCategoryChips");
     var cat = getCategory(state.activeCategory);
-    if (!cat || cat.subcategories.length === 0) {
-      container.hidden = true;
-      container.innerHTML = "";
-      return;
-    }
+    if (!cat || !cat.subcategories.length) { container.hidden = true; container.replaceChildren(); state.activeSubCategory = "all"; return; }
     container.hidden = false;
-    var html = '<button class="chip' + (state.activeSubCategory === "all" ? " is-active" : "") + '" data-sub="all">All</button>';
-    cat.subcategories.forEach(function (sub) {
-      html += '<button class="chip' + (state.activeSubCategory === sub.id ? " is-active" : "") + '" data-sub="' + sub.id + '">' + escapeHtml(sub.name) + '</button>';
-    });
-    container.innerHTML = html;
+    var choices = [{ id: "all", name: "All subcategories" }].concat(cat.subcategories);
+    if (!choices.some(function (c) { return c.id === state.activeSubCategory; })) state.activeSubCategory = "all";
+    renderFilterMenu(container, "Subcategory", choices, state.activeSubCategory, "sub");
   }
 
   function renderLocationFilters() {
-    var container = document.getElementById("locationChips");
-    var locs = allLocations();
-    if (!locs.length) { container.hidden = true; container.innerHTML = ""; return; }
-    container.hidden = false;
-    var html = '<button class="chip' + (state.activeLocation === "all" ? " is-active" : "") + '" data-location="all">All locations</button>';
-    locs.forEach(function (loc) {
-      html += '<button class="chip' + (state.activeLocation === loc.id ? " is-active" : "") + '" data-location="' + loc.id + '">' + escapeHtml(loc.name) + '</button>';
-    });
-    container.innerHTML = html;
+    var container = document.getElementById("locationChips"); container.hidden = false;
+    var choices = [{ id: "all", name: "All locations" }].concat(allLocations());
+    if (!choices.some(function (c) { return c.id === state.activeLocation; })) state.activeLocation = "all";
+    renderFilterMenu(container, "Location", choices, state.activeLocation, "location");
   }
 
   function render() {
@@ -1320,6 +1409,7 @@
 
   function closeForm() {
     if (state.editorSaving) return;
+    closeLocationSuggestions();
     itemSheet.hidden = true;
     itemForm.reset();
     state.editingId = null;
@@ -1367,6 +1457,7 @@
       items.push(data);
     }
 
+    closeLocationSuggestions();
     state.editorSaving = true;
     itemForm.inert = true;
     idbReplaceStores({ items: items, units: state.units, locations: state.locations }).then(function () {
@@ -2656,6 +2747,7 @@
   var settingsSheet = document.getElementById("settingsSheet");
 
   function renderSyncStatus() {
+    renderAppearanceControl();
     document.getElementById("syncStatusLine").textContent =
       "Last backup: " + relativeTime(state.settings.lastExportAt) + ". Last import: " + relativeTime(state.settings.lastImportAt) + ".";
     document.getElementById("deviceNameInput").value = state.settings.deviceName || "";
@@ -2718,7 +2810,7 @@
     var reloaded = false;
     var updateNotice = document.createElement("div"); updateNotice.id = "updateNotice"; updateNotice.hidden = true;
     updateNotice.setAttribute("role", "status");
-    updateNotice.style.cssText = "position:fixed;bottom:0;left:0;right:0;z-index:50;padding:14px;background:#23261f;color:#fff;gap:12px;align-items:center";
+    updateNotice.style.cssText = "position:fixed;bottom:0;left:0;right:0;z-index:50;padding:14px;background:var(--ink);color:var(--paper);gap:12px;align-items:center";
     var updateText = document.createElement("span");
     updateText.textContent = "An app update is ready. Reload when you have finished editing. ";
     var reloadButton = document.createElement("button"); reloadButton.type = "button"; reloadButton.textContent = "Reload app";
