@@ -109,12 +109,25 @@
       </label>
       <div class="field-row">
         <label>Quantity
-          <input type="number" id="scanMultiQty" min="0.01" step="0.01" inputmode="decimal" value="1">
+          <input type="number" id="scanMultiQty" required min="0.01" step="0.01" inputmode="decimal" value="1">
         </label>
         <label>Location <span class="hint">(optional)</span>
-          <input type="text" id="scanMultiLocation" list="locationSuggestions">
+          <input type="text" id="scanMultiLocation" list="locationSuggestions" maxlength="60">
         </label>
       </div>
+      <label>Expiry date <span class="hint">(optional)</span>
+        <input type="date" id="scanMultiExpiry">
+      </label>
+      <label>Expiry type
+        <select id="scanMultiExpiryType">
+          <option value="use_by">Use by</option>
+          <option value="best_before">Best before</option>
+        </select>
+      </label>
+      <label>Open date <span class="hint">(optional)</span>
+        <input type="date" id="scanMultiOpenDate">
+      </label>
+      <p class="settings-desc" id="scanMultiShelfLifeHint"></p>
       <div class="sheet-actions">
         <button type="button" id="scanMultiSkipBtn" class="btn-ghost">Skip</button>
         <button type="button" id="scanMultiAddBtn" class="btn-primary">Add &amp; keep scanning</button>
@@ -151,7 +164,8 @@
     </label>
 
     <label>Unit <span class="hint">(optional)</span>
-      <input type="text" id="fieldUnit" placeholder="e.g. cans, boxes">
+      <input type="text" id="fieldUnit" list="unitSuggestions" placeholder="e.g. cans, boxes">
+      <datalist id="unitSuggestions"></datalist>
     </label>
 
     <div class="field-row">

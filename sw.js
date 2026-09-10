@@ -1,4 +1,4 @@
-var CACHE_NAME = "depot-cache-v16";
+var CACHE_NAME = "depot-cache-v17";
 var FILES_TO_CACHE = [
   "./index.html",
   "./style.css",
@@ -21,7 +21,7 @@ self.addEventListener("activate", function (event) {
   event.waitUntil(
     caches.keys().then(function (keys) {
       return Promise.all(
-        keys.filter(function (key) { return key !== CACHE_NAME; })
+        keys.filter(function (key) { return key.indexOf("depot-cache-") === 0 && key !== CACHE_NAME; })
             .map(function (key) { return caches.delete(key); })
       );
     })
