@@ -26,6 +26,7 @@
     formCategoryId: null,
     formSubCategoryId: null,
     formBatches: [],
+    formBarcodes: [],
     editingBatchId: null,
     newCategoryColor: SWATCHES[0],
     expandedCategoryIds: {},
@@ -186,7 +187,11 @@
 
       if (it.reorderThreshold === undefined) { it.reorderThreshold = null; changed = true; }
       if (it.openShelfLifeDays === undefined) { it.openShelfLifeDays = null; changed = true; }
-      if (it.barcode === undefined) { it.barcode = null; changed = true; }
+      if (it.barcodes === undefined) {
+        it.barcodes = it.barcode ? [it.barcode] : [];
+        delete it.barcode;
+        changed = true;
+      }
     });
     return changed;
   }
@@ -571,7 +576,7 @@
     if (item.unit) metaParts.push(item.unit);
     if (item.reorderThreshold !== null) metaParts.push("Reorder at " + formatQty(item.reorderThreshold));
     if (item.openShelfLifeDays !== null) metaParts.push("Once opened: " + item.openShelfLifeDays + "d");
-    if (item.barcode) metaParts.push("Barcode " + item.barcode);
+    if (item.barcodes && item.barcodes.length) metaParts.push("Barcodes: " + item.barcodes.join(", "));
     document.getElementById("viewItemMeta").textContent = metaParts.join(" · ");
 
     renderViewBatches(item);
@@ -683,6 +688,34 @@
 
   document.getElementById("fieldUnit").addEventListener("input", renderFormBatches);
   document.getElementById("fieldOpenShelfLife").addEventListener("input", renderFormBatches);
+
+  function renderFormBarcodes() {
+    var container = document.getElementById("formBarcodeList");
+    if (!state.formBarcodes.length) {
+      container.innerHTML = '<li class="batch-empty">No barcodes attached yet.</li>';
+      return;
+    }
+    container.innerHTML = state.formBarcodes.map(function (code) {
+      return '<li class="batch-row"><span class="batch-qty">' + escapeHtml(code) + '</span>' +
+        '<button type="button" class="icon-btn form-barcode-remove" data-code="' + escapeHtml(code) + '" title="Remove">🗑</button></li>';
+    }).join("");
+  }
+
+  document.getElementById("addBarcodeBtn").addEventListener("click", function () {
+    var input = document.getElementById("newBarcodeInput");
+    var code = input.value.trim();
+    if (!code) return;
+    if (state.formBarcodes.indexOf(code) === -1) state.formBarcodes.push(code);
+    input.value = "";
+    renderFormBarcodes();
+  });
+
+  document.getElementById("formBarcodeList").addEventListener("click", function (e) {
+    var btn = e.target.closest(".form-barcode-remove");
+    if (!btn) return;
+    state.formBarcodes = state.formBarcodes.filter(function (c) { return c !== btn.dataset.code; });
+    renderFormBarcodes();
+  });
 
   document.getElementById("formBatchList").addEventListener("click", function (e) {
     var editBtn = e.target.closest(".batch-edit");
@@ -808,8 +841,10 @@
     document.getElementById("fieldUnit").value = item ? (item.unit || "") : "";
     document.getElementById("fieldReorderThreshold").value = item && item.reorderThreshold !== null ? formatQty(item.reorderThreshold) : "";
     document.getElementById("fieldOpenShelfLife").value = item && item.openShelfLifeDays !== null ? item.openShelfLifeDays : "";
-    document.getElementById("fieldBarcode").value = item ? (item.barcode || "") : "";
     document.getElementById("fieldNotes").value = item ? (item.notes || "") : "";
+
+    state.formBarcodes = item ? item.barcodes.slice() : [];
+    renderFormBarcodes();
 
     var defaultCatId = state.categories.length ? state.categories[0].id : null;
     state.formCategoryId = item ? (getCategory(item.categoryId) ? item.categoryId : defaultCatId) : defaultCatId;
@@ -851,7 +886,7 @@
       unit: document.getElementById("fieldUnit").value.trim(),
       reorderThreshold: reorderVal === "" ? null : roundQty(Number(reorderVal)),
       openShelfLifeDays: shelfLifeVal === "" ? null : Math.max(1, Number(shelfLifeVal) || 1),
-      barcode: document.getElementById("fieldBarcode").value.trim() || null,
+      barcodes: state.formBarcodes.slice(),
       batches: state.formBatches.map(function (b) { return Object.assign({}, b); }),
       notes: document.getElementById("fieldNotes").value.trim(),
       updatedAt: new Date().toISOString()
@@ -1018,7 +1053,9 @@
         '</div>' +
         '<div class="item-row-bottom">' +
           '<p class="item-sub"></p>' +
-          '<div class="item-meta"><span class="item-qty"></span></div>' +
+          '<div class="item-meta"><span class="item-qty"></span>' +
+            '<button type="button" class="icon-btn history-delete" data-id="' + entry.id + '" title="Delete this record">🗑</button>' +
+          '</div>' +
         '</div>';
       li.querySelector(".item-name").textContent = entry.name;
       li.querySelector(".item-category").textContent = categoryName(entry.categoryId);
@@ -1028,6 +1065,15 @@
     });
   }
 
+  historyList.addEventListener("click", function (e) {
+    var btn = e.target.closest(".history-delete");
+    if (!btn) return;
+    if (!confirm("Delete this withdrawal record?")) return;
+    state.history = state.history.filter(function (h) { return h.id !== btn.dataset.id; });
+    saveHistory();
+    renderHistory();
+  });
+
   document.getElementById("historyBtn").addEventListener("click", function () {
     settingsSheet.hidden = true;
     renderHistory();
@@ -1035,6 +1081,25 @@
   });
   document.getElementById("historyCloseBtn").addEventListener("click", function () { historySheet.hidden = true; });
   historySheet.addEventListener("click", function (e) { if (e.target === historySheet) historySheet.hidden = true; });
+
+  document.getElementById("historyClearShownBtn").addEventListener("click", function () {
+    var shown = visibleHistory();
+    if (!shown.length) return;
+    if (!confirm("Clear the " + shown.length + " withdrawal record(s) currently shown? This can't be undone.")) return;
+    var shownIds = {};
+    shown.forEach(function (h) { shownIds[h.id] = true; });
+    state.history = state.history.filter(function (h) { return !shownIds[h.id]; });
+    saveHistory();
+    renderHistory();
+  });
+
+  document.getElementById("historyClearAllBtn").addEventListener("click", function () {
+    if (!state.history.length) return;
+    if (!confirm("Clear all withdrawal history? This can't be undone.")) return;
+    state.history = [];
+    saveHistory();
+    renderHistory();
+  });
 
   // ---------- manage categories sheet ----------
 
@@ -1684,7 +1749,8 @@
     stopScanCamera();
 
     if (state.scanContext === "fill-field") {
-      document.getElementById("fieldBarcode").value = code;
+      if (state.formBarcodes.indexOf(code) === -1) state.formBarcodes.push(code);
+      renderFormBarcodes();
       scanSheet.hidden = true;
       return;
     }
@@ -1692,7 +1758,7 @@
     document.getElementById("scanCameraWrap").hidden = true;
     document.getElementById("scanResultWrap").hidden = false;
 
-    var item = state.items.find(function (it) { return it.barcode === code; });
+    var item = state.items.find(function (it) { return it.barcodes.indexOf(code) !== -1; });
     var actionsEl = document.getElementById("scanResultActions");
 
     if (item) {
@@ -1718,14 +1784,15 @@
       document.getElementById("scanCreateBtn").onclick = function () {
         closeScanSheet();
         openForm(null);
-        document.getElementById("fieldBarcode").value = code;
+        state.formBarcodes = [code];
+        renderFormBarcodes();
       };
       document.getElementById("scanAttachBtn").onclick = function () {
         var name = prompt("Which item should this barcode attach to? Type its exact name.");
         if (!name || !name.trim()) return;
         var match = state.items.find(function (it) { return it.name.toLowerCase() === name.trim().toLowerCase(); });
         if (!match) { alert('No item named "' + name.trim() + '" found.'); return; }
-        match.barcode = code;
+        if (match.barcodes.indexOf(code) === -1) match.barcodes.push(code);
         match.updatedAt = new Date().toISOString();
         saveItems();
         closeScanSheet();
@@ -1740,7 +1807,7 @@
   }
 
   document.getElementById("scanBtn").addEventListener("click", function () { openScanSheet("global"); });
-  document.getElementById("fieldBarcodeScanBtn").addEventListener("click", function () { openScanSheet("fill-field"); });
+  document.getElementById("newBarcodeScanBtn").addEventListener("click", function () { openScanSheet("fill-field"); });
   document.getElementById("scanCancelBtn").addEventListener("click", closeScanSheet);
   scanSheet.addEventListener("click", function (e) { if (e.target === scanSheet) closeScanSheet(); });
 

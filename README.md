@@ -265,3 +265,17 @@ for that item; on no match, **Create new item** (barcode pre-filled) or
 **Attach to existing item**. The camera icon next to the Barcode field in the
 item form scans straight into that field instead, for when you're just
 tagging an item you're already editing.
+
+## Multiple barcodes per item
+
+`barcode` (single value) is now `barcodes` (a list) — old data migrates
+automatically. Add several to the same item from the item form, or via
+Attach to existing item during a scan, so different brands/packagings of
+"the same thing" can share one entry.
+
+## Clearing withdrawal history
+
+In the history sheet: **Clear shown** removes whatever the current
+search/category filter has narrowed to (search an item's name first to
+clear just its records), **Clear all** wipes the whole log, and each row
+now has its own delete button for one-off corrections.

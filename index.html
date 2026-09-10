@@ -114,12 +114,13 @@
       </label>
     </div>
 
-    <label>Barcode <span class="hint">(optional)</span>
-      <div class="input-with-button">
-        <input type="text" id="fieldBarcode" inputmode="numeric" maxlength="40">
-        <button type="button" id="fieldBarcodeScanBtn" class="btn-secondary">📷</button>
-      </div>
-    </label>
+    <label>Barcodes <span class="hint">(optional — a tin of beans might have several brand barcodes)</span></label>
+    <ul id="formBarcodeList" class="batch-list"></ul>
+    <div class="input-with-button">
+      <input type="text" id="newBarcodeInput" inputmode="numeric" placeholder="Type or scan a barcode" maxlength="40">
+      <button type="button" id="newBarcodeScanBtn" class="btn-secondary">📷</button>
+    </div>
+    <button type="button" id="addBarcodeBtn" class="btn-secondary">Add barcode</button>
 
     <div class="batches-section">
       <div class="batches-header">
@@ -209,6 +210,10 @@
     <div class="chips" id="historyCategoryChips"></div>
     <ul id="historyList" class="item-list"></ul>
     <p id="historyEmpty" class="settings-desc" hidden>No withdrawals recorded yet.</p>
+    <div class="sheet-actions">
+      <button type="button" id="historyClearShownBtn" class="btn-danger">Clear shown</button>
+      <button type="button" id="historyClearAllBtn" class="btn-danger">Clear all</button>
+    </div>
     <button id="historyCloseBtn" class="btn-ghost">Close</button>
   </div>
 </div>
