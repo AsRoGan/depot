@@ -5,7 +5,7 @@
   var LS_HISTORY_KEY = "depot.history.v1";
   var LS_CATEGORIES_KEY = "depot.categories.v1";
   var LS_SETTINGS_KEY = "depot.settings.v1";
-  var APP_VERSION = "v14";
+  var APP_VERSION = "v15";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
 
   var state = {
@@ -55,6 +55,27 @@
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+
+  // ---------- undo toast ----------
+
+  var undoToast = document.getElementById("undoToast");
+  var undoTimer = null;
+  var lastUndoFn = null;
+
+  function showUndoToast(label, restoreFn) {
+    lastUndoFn = restoreFn;
+    document.getElementById("undoToastLabel").textContent = label;
+    undoToast.hidden = false;
+    if (undoTimer) clearTimeout(undoTimer);
+    undoTimer = setTimeout(function () { undoToast.hidden = true; lastUndoFn = null; }, 6000);
+  }
+
+  document.getElementById("undoToastBtn").addEventListener("click", function () {
+    if (undoTimer) clearTimeout(undoTimer);
+    undoToast.hidden = true;
+    if (lastUndoFn) lastUndoFn();
+    lastUndoFn = null;
+  });
 
   function defaultCategories() {
     return [
@@ -659,13 +680,24 @@
     openForm(state.viewingId);
   });
 
+  function deleteItemWithUndo(id, afterClose) {
+    var item = state.items.find(function (it) { return it.id === id; });
+    if (!item) return;
+    var snapshot = state.items.slice();
+    state.items = state.items.filter(function (it) { return it.id !== id; });
+    saveItems();
+    if (afterClose) afterClose();
+    render();
+    showUndoToast('Deleted "' + item.name + '".', function () {
+      state.items = snapshot;
+      saveItems();
+      render();
+    });
+  }
+
   document.getElementById("viewDeleteBtn").addEventListener("click", function () {
     if (!state.viewingId) return;
-    if (!confirm("Delete this item? This can't be undone.")) return;
-    state.items = state.items.filter(function (it) { return it.id !== state.viewingId; });
-    saveItems();
-    itemViewSheet.hidden = true;
-    render();
+    deleteItemWithUndo(state.viewingId, function () { itemViewSheet.hidden = true; });
   });
 
   document.getElementById("viewWithdrawBtn").addEventListener("click", function () {
@@ -970,11 +1002,7 @@
 
   deleteBtn.addEventListener("click", function () {
     if (!state.editingId) return;
-    if (!confirm("Delete this item? This can't be undone.")) return;
-    state.items = state.items.filter(function (it) { return it.id !== state.editingId; });
-    saveItems();
-    closeForm();
-    render();
+    deleteItemWithUndo(state.editingId, closeForm);
   });
 
   // ---------- withdraw sheet ----------
@@ -1131,10 +1159,11 @@
   historyList.addEventListener("click", function (e) {
     var btn = e.target.closest(".history-delete");
     if (!btn) return;
-    if (!confirm("Delete this withdrawal record?")) return;
+    var snapshot = state.history.slice();
     state.history = state.history.filter(function (h) { return h.id !== btn.dataset.id; });
     saveHistory();
     renderHistory();
+    showUndoToast("Deleted 1 withdrawal record.", function () { state.history = snapshot; saveHistory(); renderHistory(); });
   });
 
   document.getElementById("historyBtn").addEventListener("click", function () {
@@ -1148,20 +1177,22 @@
   document.getElementById("historyClearShownBtn").addEventListener("click", function () {
     var shown = visibleHistory();
     if (!shown.length) return;
-    if (!confirm("Clear the " + shown.length + " withdrawal record(s) currently shown? This can't be undone.")) return;
+    var snapshot = state.history.slice();
     var shownIds = {};
     shown.forEach(function (h) { shownIds[h.id] = true; });
     state.history = state.history.filter(function (h) { return !shownIds[h.id]; });
     saveHistory();
     renderHistory();
+    showUndoToast("Cleared " + shown.length + " withdrawal record(s).", function () { state.history = snapshot; saveHistory(); renderHistory(); });
   });
 
   document.getElementById("historyClearAllBtn").addEventListener("click", function () {
     if (!state.history.length) return;
-    if (!confirm("Clear all withdrawal history? This can't be undone.")) return;
+    var snapshot = state.history.slice();
     state.history = [];
     saveHistory();
     renderHistory();
+    showUndoToast("Cleared all " + snapshot.length + " withdrawal record(s).", function () { state.history = snapshot; saveHistory(); renderHistory(); });
   });
 
   // ---------- manage categories sheet ----------
@@ -1226,14 +1257,23 @@
     var delBtn = e.target.closest(".cat-delete");
     if (delBtn) {
       var id2 = delBtn.dataset.id; var cat2 = getCategory(id2); if (!cat2) return;
-      var count = state.items.filter(function (it) { return it.categoryId === id2; }).length;
-      var msg = count > 0 ? ('Delete "' + cat2.name + '"? ' + count + " item(s) will become Uncategorized.") : ('Delete "' + cat2.name + '"?');
-      if (!confirm(msg)) return;
+      var affected = state.items.filter(function (it) { return it.categoryId === id2; });
+      var itemsSnapshot = state.items.map(function (it) { return Object.assign({}, it); });
+      var categoriesSnapshot = state.categories.map(function (c) { return Object.assign({}, c, { subcategories: c.subcategories.slice() }); });
       state.items.forEach(function (it) { if (it.categoryId === id2) { it.categoryId = null; it.subcategoryId = null; } });
       state.categories = state.categories.filter(function (c) { return c.id !== id2; });
       if (state.activeCategory === id2) { state.activeCategory = "all"; state.activeSubCategory = "all"; }
       saveItems(); saveCategories();
       renderCategoryManageList(); render();
+      showUndoToast(
+        'Deleted "' + cat2.name + '"' + (affected.length ? " (" + affected.length + " item(s) moved to Uncategorized)" : "") + ".",
+        function () {
+          state.items = itemsSnapshot;
+          state.categories = categoriesSnapshot;
+          saveItems(); saveCategories();
+          renderCategoryManageList(); render();
+        }
+      );
       return;
     }
     var subRename = e.target.closest(".sub-rename");
@@ -2090,11 +2130,14 @@
   });
 
   document.getElementById("clearAllBtn").addEventListener("click", function () {
-    if (!confirm("Delete every item in Depot? This can't be undone.")) return;
+    if (!state.items.length) return;
+    if (!confirm("Delete every item in Depot? This wipes all " + state.items.length + " item(s).")) return;
+    var snapshot = state.items.slice();
     state.items = [];
     saveItems();
     render();
     settingsSheet.hidden = true;
+    showUndoToast("Deleted all " + snapshot.length + " item(s).", function () { state.items = snapshot; saveItems(); render(); });
   });
 
   // ---------- offline support ----------

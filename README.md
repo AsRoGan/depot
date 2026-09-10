@@ -320,3 +320,14 @@ session so you don't lose track partway through. Location remembers the
 last one you typed, since a scanning session is usually one shelf at a
 time. The same barcode won't re-trigger the overlay for 3 seconds, so
 holding the camera steady on one item doesn't spam repeat prompts.
+
+## Undo
+
+Deleting an item, a category, or clearing withdrawal history now shows a
+6-second "Undo" toast instead of (or alongside) a confirmation dialog.
+Design choice: for single-item and single-record deletes, the confirm
+dialog is gone entirely — delete-then-undo is faster day-to-day than
+confirm-then-delete, and the undo window covers the mis-tap case just as
+well. "Delete all items" keeps its confirm dialog too, on top of undo,
+since wiping the whole inventory is a different order of consequence
+than removing one thing.
