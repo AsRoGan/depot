@@ -5,7 +5,7 @@
   var LS_HISTORY_KEY = "depot.history.v1";
   var LS_CATEGORIES_KEY = "depot.categories.v1";
   var LS_SETTINGS_KEY = "depot.settings.v1";
-  var APP_VERSION = "v16";
+  var APP_VERSION = "v17";
   var SWATCHES = ["#6B8F47", "#B23A48", "#3E6C8C", "#8A6E4B", "#B8912F", "#3E8C7E", "#7A4E7E", "#5B6770"];
 
   var state = {
@@ -13,6 +13,7 @@
     history: [],
     categories: [],
     locations: [],
+    units: [],
     settings: { soonDays: 30, urgentDays: 7, depletionThreshold: 0, deviceName: "", lastExportAt: null, lastImportAt: null },
     activeCategory: "all",
     activeSubCategory: "all",
@@ -95,7 +96,7 @@
   // ---------- IndexedDB layer ----------
 
   var DB_NAME = "depot-db";
-  var DB_VERSION = 2;
+  var DB_VERSION = 3;
   var dbPromise = null;
 
   function openDB() {
@@ -104,7 +105,7 @@
       var req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = function (e) {
         var db = e.target.result;
-        ["items", "history", "categories", "locations", "photos"].forEach(function (name) {
+        ["items", "history", "categories", "locations", "photos", "units"].forEach(function (name) {
           if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: "id" });
         });
         if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv", { keyPath: "key" });
@@ -191,31 +192,51 @@
     });
   }
 
-  function saveItems() { idbClearAndPutAll("items", state.items).catch(function (e) { console.error("Save items failed", e); }); }
+  function idbReplaceStores(recordsByStore) {
+    var snapshot = JSON.parse(JSON.stringify(recordsByStore));
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(Object.keys(snapshot), "readwrite");
+        tx.oncomplete = resolve;
+        tx.onabort = function () { reject(tx.error || new Error("Storage transaction aborted")); };
+        tx.onerror = function () { /* The abort handler reports the failed transaction. */ };
+        try {
+          Object.keys(snapshot).forEach(function (name) {
+            var store = tx.objectStore(name);
+            store.clear();
+            snapshot[name].forEach(function (record) { store.put(record); });
+          });
+        } catch (err) { tx.abort(); reject(err); }
+      });
+    });
+  }
+
+  function saveItems() { return idbReplaceStores({ items: state.items, units: state.units }).catch(function (e) { console.error("Save items failed", e); }); }
   function saveHistory() { idbClearAndPutAll("history", state.history).catch(function (e) { console.error("Save history failed", e); }); }
   function saveCategories() { idbClearAndPutAll("categories", state.categories).catch(function (e) { console.error("Save categories failed", e); }); }
   function saveLocations() { idbClearAndPutAll("locations", state.locations).catch(function (e) { console.error("Save locations failed", e); }); }
   function saveSettings() { idbSetKV("settings", state.settings).catch(function (e) { console.error("Save settings failed", e); }); }
 
   function migrateFromLocalStorage() {
-    return idbGetAll("items").then(function (existing) {
-      if (existing.length > 0) return;
-      var oldRaw = localStorage.getItem(LS_ITEMS_KEY);
-      if (!oldRaw) return;
-      var oldItems, oldHistory, oldCategories, oldSettings;
-      try {
-        oldItems = JSON.parse(oldRaw) || [];
-        oldHistory = JSON.parse(localStorage.getItem(LS_HISTORY_KEY) || "[]");
-        oldCategories = JSON.parse(localStorage.getItem(LS_CATEGORIES_KEY) || "null");
-        oldSettings = JSON.parse(localStorage.getItem(LS_SETTINGS_KEY) || "null");
-      } catch (e) {
-        console.error("Could not parse existing localStorage data during migration", e);
-        return;
-      }
-      var jobs = [idbClearAndPutAll("items", oldItems), idbClearAndPutAll("history", oldHistory)];
-      if (oldCategories) jobs.push(idbClearAndPutAll("categories", oldCategories));
-      if (oldSettings) jobs.push(idbSetKV("settings", oldSettings));
-      return Promise.all(jobs);
+    return idbGetKV("legacyMigrationComplete", false).then(function (done) {
+      if (done) return;
+      return Promise.all([idbGetAll("items"), idbGetAll("history"), idbGetAll("categories"), idbGetAll("locations"), idbGetKV("settings", null)])
+        .then(function (existing) {
+          // Older IndexedDB installations have no marker. Any existing DB data,
+          // including categories after clearing items, means this is not a first run.
+          if (existing.slice(0, 4).some(function (rows) { return rows.length; }) || existing[4]) {
+            return idbSetKV("legacyMigrationComplete", true);
+          }
+          var oldRaw = localStorage.getItem(LS_ITEMS_KEY);
+          if (!oldRaw) return idbSetKV("legacyMigrationComplete", true);
+          var items = JSON.parse(oldRaw) || [];
+          var history = JSON.parse(localStorage.getItem(LS_HISTORY_KEY) || "[]");
+          var categories = JSON.parse(localStorage.getItem(LS_CATEGORIES_KEY) || "[]");
+          var settings = JSON.parse(localStorage.getItem(LS_SETTINGS_KEY) || "null");
+          var kv = [{ key: "legacyMigrationComplete", value: true }];
+          if (settings) kv.push({ key: "settings", value: settings });
+          return idbReplaceStores({ items: items, history: history, categories: categories, kv: kv });
+        });
     });
   }
 
@@ -399,6 +420,38 @@
     }).join("");
   }
 
+  // ---------- unit records ----------
+
+  function unitKey(name) { return String(name || "").trim().replace(/\s+/g, " ").toLowerCase(); }
+
+  function resolveUnit(name) {
+    var label = String(name || "").trim().replace(/\s+/g, " ");
+    if (!label) return null;
+    var key = unitKey(label);
+    var unit = state.units.find(function (u) { return unitKey(u.name) === key; });
+    if (!unit) { unit = { id: uid(), name: label }; state.units.push(unit); }
+    return unit;
+  }
+
+  function normalizeItemUnits(items) {
+    var changed = false;
+    items.forEach(function (item) {
+      var unit = resolveUnit(item.unit);
+      var unitId = unit ? unit.id : null;
+      var label = unit ? unit.name : "";
+      if (item.unitId !== unitId || item.unit !== label) changed = true;
+      item.unitId = unitId;
+      item.unit = label;
+    });
+    return changed;
+  }
+
+  function renderUnitSuggestions() {
+    document.getElementById("unitSuggestions").innerHTML = state.units.slice()
+      .sort(function (a, b) { return a.name.localeCompare(b.name); })
+      .map(function (u) { return '<option value="' + escapeHtml(u.name) + '"></option>'; }).join("");
+  }
+
   // ---------- batch / expiry helpers ----------
 
   function itemTotalQty(item) {
@@ -493,7 +546,8 @@
       var eff = getBatchEffectiveDate(item, b);
       if (!eff) return;
       var s = expiryStatus(eff.date, eff.type);
-      if (!worst || STATUS_RANK[s.cls] > STATUS_RANK[worst.status.cls]) worst = { batch: b, eff: eff, status: s };
+      if (!worst || STATUS_RANK[s.cls] > STATUS_RANK[worst.status.cls] ||
+          (STATUS_RANK[s.cls] === STATUS_RANK[worst.status.cls] && daysUntil(eff.date) < daysUntil(worst.eff.date))) worst = { batch: b, eff: eff, status: s };
     });
     return worst;
   }
@@ -715,7 +769,7 @@
       var locName = locationName(b.locationId);
       var locText = locName ? " · " + escapeHtml(locName) : "";
       return '<li class="batch-row" data-id="' + b.id + '">' +
-        '<span class="batch-qty">' + qtyText + '</span>' +
+        '<span class="batch-qty">' + escapeHtml(qtyText) + '</span>' +
         '<span class="batch-expiry ' + status.cls + '">' + status.label + locText + '</span>' +
         '<button type="button" class="icon-btn" title="Edit this batch">✎</button>' +
       '</li>';
@@ -987,7 +1041,7 @@
       var locName = locationName(b.locationId);
       var locText = locName ? " · " + escapeHtml(locName) : "";
       return '<li class="batch-row" data-id="' + b.id + '">' +
-        '<span class="batch-qty">' + qtyText + '</span>' +
+        '<span class="batch-qty">' + escapeHtml(qtyText) + '</span>' +
         '<span class="batch-expiry ' + status.cls + '">' + status.label + locText + '</span>' +
         '<button type="button" class="icon-btn batch-edit" data-id="' + b.id + '" title="Edit">✎</button>' +
         '<button type="button" class="icon-btn batch-delete" data-id="' + b.id + '" title="Remove">🗑</button>' +
@@ -1145,6 +1199,7 @@
     document.getElementById("fieldOpenShelfLife").value = item && item.openShelfLifeDays !== null ? item.openShelfLifeDays : "";
     document.getElementById("fieldNotes").value = item ? (item.notes || "") : "";
 
+    renderUnitSuggestions();
     state.formBarcodes = item ? item.barcodes.slice() : [];
     renderFormBarcodes();
 
@@ -1181,11 +1236,13 @@
     var reorderVal = document.getElementById("fieldReorderThreshold").value;
     var shelfLifeVal = document.getElementById("fieldOpenShelfLife").value;
 
+    var unit = resolveUnit(document.getElementById("fieldUnit").value);
     var data = {
       name: name,
       categoryId: state.formCategoryId,
       subcategoryId: state.formSubCategoryId || null,
-      unit: document.getElementById("fieldUnit").value.trim(),
+      unit: unit ? unit.name : "",
+      unitId: unit ? unit.id : null,
       reorderThreshold: reorderVal === "" ? null : roundQty(Number(reorderVal)),
       openShelfLifeDays: shelfLifeVal === "" ? null : Math.max(1, Number(shelfLifeVal) || 1),
       barcodes: state.formBarcodes.slice(),
@@ -1706,6 +1763,19 @@
     return existing.concat(added);
   }
 
+  function preserveLocalPhotos(incoming, existing) {
+    var local = new Map(existing.map(function (record) { return [record.id, record]; }));
+    return incoming.map(function (record) {
+      var current = local.get(record.id);
+      var photos = current && Array.isArray(current.photoIds) ? current.photoIds.slice() : [];
+      return Object.assign({}, record, {
+        photoIds: photos,
+        heroPhotoId: current && photos.indexOf(current.heroPhotoId) !== -1 ? current.heroPhotoId : (photos[0] || null),
+        photosUpdatedAt: current ? (current.photosUpdatedAt || null) : null
+      });
+    });
+  }
+
   function mergeItemsLWW(existing, incoming) {
     var map = {};
     existing.forEach(function (it) { map[it.id] = it; });
@@ -1743,11 +1813,12 @@
         var importedCategories = Array.isArray(parsed) ? null : (parsed.categories || null);
         var importedLocations = Array.isArray(parsed) ? null : (parsed.locations || null);
         var importedSettings = Array.isArray(parsed) ? null : (parsed.settings || null);
+        var importedUnits = Array.isArray(parsed) ? [] : (parsed.units || []);
         var exportedBy = Array.isArray(parsed) ? "" : (parsed.exportedBy || "");
         var exportedAt = Array.isArray(parsed) ? null : (parsed.exportedAt || null);
         if (!Array.isArray(importedItems)) throw new Error("File is not a valid backup");
 
-        state.pendingImport = { items: importedItems, history: importedHistory, categories: importedCategories, locations: importedLocations, settings: importedSettings };
+        state.pendingImport = { items: importedItems, history: importedHistory, categories: importedCategories, locations: importedLocations, settings: importedSettings, units: importedUnits };
 
         var existingIds = {};
         state.items.forEach(function (it) { existingIds[it.id] = true; });
@@ -1786,7 +1857,8 @@
     var itemsMode = document.querySelector("#importItemsSegmented .segment.is-active").dataset.mode;
     var historyMode = document.querySelector("#importHistorySegmented .segment.is-active").dataset.mode;
 
-    state.items = itemsMode === "replace" ? state.pendingImport.items : mergeItemsLWW(state.items, state.pendingImport.items);
+    var incomingItems = preserveLocalPhotos(state.pendingImport.items, state.items);
+    state.items = itemsMode === "replace" ? incomingItems : mergeItemsLWW(state.items, incomingItems);
     state.history = historyMode === "replace" ? state.pendingImport.history : mergeById(state.history, state.pendingImport.history);
 
     if (state.pendingImport.categories) {
@@ -1802,7 +1874,7 @@
     }
 
     if (state.pendingImport.locations) {
-      state.pendingImport.locations.forEach(function (il) {
+      preserveLocalPhotos(state.pendingImport.locations, state.locations).forEach(function (il) {
         if (!getLocation(il.id)) state.locations.push(il);
       });
     }
@@ -1815,6 +1887,11 @@
     state.settings.lastImportAt = new Date().toISOString();
 
     migrateItems(state.items);
+    migrateHistory(state.history);
+    migrateBatchLocations(state.items, state.locations);
+    normalizeLocations(state.locations);
+    (state.pendingImport.units || []).forEach(function (unit) { resolveUnit(unit.name); });
+    normalizeItemUnits(state.items);
     saveItems(); saveHistory(); saveCategories(); saveLocations(); saveSettings();
 
     state.pendingImport = null;
@@ -1864,7 +1941,7 @@
       return '<li class="category-row">' +
         '<div class="category-row-main">' +
           '<span class="category-name">' + escapeHtml(e.item.name) + '</span>' +
-          '<span class="category-count">' + formatQty(e.batch.quantity) + (e.item.unit ? " " + e.item.unit : "") + '</span>' +
+          '<span class="category-count">' + formatQty(e.batch.quantity) + (e.item.unit ? " " + escapeHtml(e.item.unit) : "") + '</span>' +
           '<button type="button" class="btn-danger audit-remove" data-item-id="' + e.item.id + '" data-batch-id="' + e.batch.id + '">Remove</button>' +
           '<button type="button" class="btn-secondary audit-move" data-item-id="' + e.item.id + '" data-batch-id="' + e.batch.id + '">Move</button>' +
         '</div>' +
@@ -1886,7 +1963,7 @@
       return '<li class="batch-row">' +
         '<input type="checkbox" class="audit-check" data-batch-id="' + e.batch.id + '"' + (checked ? " checked" : "") + '>' +
         '<span class="batch-qty">' + escapeHtml(e.item.name) + '</span>' +
-        '<span class="batch-expiry ' + status.cls + '">' + qtyText + (status.label ? " · " + status.label : "") + '</span>' +
+        '<span class="batch-expiry ' + status.cls + '">' + escapeHtml(qtyText) + (status.label ? " · " + status.label : "") + '</span>' +
       '</li>';
     }).join("");
 
@@ -1971,30 +2048,47 @@
   }
   document.getElementById("auditPhotoCancelBtn").addEventListener("click", closeAuditPhotoPanel);
 
+  function replaceLocationPhotos(loc, blobs) {
+    var now = new Date().toISOString();
+    var records = blobs.map(function (blob) { return { id: uid(), blob: blob, createdAt: now }; });
+    var updated = Object.assign({}, loc, {
+      photoIds: records.map(function (record) { return record.id; }),
+      heroPhotoId: records[0].id, photosUpdatedAt: now, updatedAt: now
+    });
+    return openDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(["photos", "locations"], "readwrite");
+        tx.oncomplete = function () { resolve(updated); };
+        tx.onabort = function () { reject(tx.error || new Error("Photo update aborted")); };
+        tx.onerror = function () {};
+        try {
+          var photos = tx.objectStore("photos");
+          records.forEach(function (record) { photos.put(record); });
+          tx.objectStore("locations").put(updated);
+          loc.photoIds.forEach(function (id) { photos.delete(id); });
+        } catch (err) { tx.abort(); reject(err); }
+      });
+    });
+  }
+
+  var auditPhotosSaving = false;
   document.getElementById("auditPhotoSaveBtn").addEventListener("click", function () {
     var loc = getLocation(state.auditLocation);
-    if (!loc) return;
+    if (!loc || auditPhotosSaving) return;
     if (!state.auditPhotoDraft.length) { alert("Add at least one photo, or Cancel."); return; }
-
-    var oldIds = loc.photoIds.slice();
-    Promise.all(oldIds.map(function (id) { return idbDeletePhoto(id); }))
-      .then(function () {
-        return Promise.all(state.auditPhotoDraft.map(function (blob) {
-          var id = uid();
-          return idbPutPhoto({ id: id, blob: blob, createdAt: new Date().toISOString() }).then(function () { return id; });
-        }));
-      })
-      .then(function (newIds) {
-        loc.photoIds = newIds;
-        loc.heroPhotoId = newIds[0] || null;
-        loc.photosUpdatedAt = new Date().toISOString();
-        loc.updatedAt = loc.photosUpdatedAt;
-        saveLocations();
-        closeAuditPhotoPanel();
-        renderAuditLocationHeader();
-        renderLocationManageList();
-      })
-      .catch(function (err) { alert("Couldn't save photos: " + err.message); });
+    auditPhotosSaving = true;
+    document.getElementById("auditPhotoSaveBtn").disabled = true;
+    replaceLocationPhotos(loc, state.auditPhotoDraft.slice()).then(function (updated) {
+      Object.assign(loc, updated);
+      closeAuditPhotoPanel();
+      if (state.auditLocation === loc.id) renderAuditLocationHeader();
+      renderLocationManageList();
+    }).catch(function (err) {
+      alert("Couldn't save photos. Your previous photos are unchanged: " + err.message);
+    }).finally(function () {
+      auditPhotosSaving = false;
+      document.getElementById("auditPhotoSaveBtn").disabled = false;
+    });
   });
 
   function startAudit(locationId) {
@@ -2132,7 +2226,7 @@
       list.forEach(function (r) {
         html += '<li class="category-row"><div class="category-row-main">' +
           '<span class="category-name">' + escapeHtml(r.item.name) + '</span>' +
-          '<span class="category-count">' + formatQty(r.total) + (r.item.unit ? " " + r.item.unit : "") + '</span>' +
+          '<span class="category-count">' + formatQty(r.total) + (r.item.unit ? " " + escapeHtml(r.item.unit) : "") + '</span>' +
         '</div><p class="settings-desc">' + escapeHtml(r.reasons.join(", ")) + '</p></li>';
       });
     });
@@ -2206,6 +2300,8 @@
   var scanStream = null;
   var scanRAF = null;
   var barcodeDetector = null;
+  var scanGeneration = 0;
+  var scanSaving = false;
 
   function supportsBarcodeDetector() { return "BarcodeDetector" in window; }
 
@@ -2217,44 +2313,54 @@
   }
 
   function startScanCamera() {
+    stopScanCamera();
+    var generation = scanGeneration;
     document.getElementById("scanUnsupported").hidden = true;
     document.getElementById("scanResultWrap").hidden = true;
     document.getElementById("scanCameraWrap").hidden = false;
     document.getElementById("scanStatusLine").textContent = "Point the camera at a barcode.";
 
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function (stream) {
+      if (generation !== scanGeneration || scanSheet.hidden) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
       scanStream = stream;
       var video = document.getElementById("scanVideo");
       video.srcObject = stream;
       barcodeDetector = new window.BarcodeDetector();
       scanLoop();
     }).catch(function (err) {
+      if (generation !== scanGeneration || scanSheet.hidden) return;
+      stopScanCamera();
       showScanUnsupported("Couldn't access the camera (" + err.message + "). Check camera permissions for this site in your browser settings.");
     });
   }
 
-  function scanLoop() {
-    if (!scanStream) return;
-    if (state.scanPaused) { scanRAF = requestAnimationFrame(scanLoop); return; }
-    var video = document.getElementById("scanVideo");
-    if (video.readyState >= 2) {
-      barcodeDetector.detect(video).then(function (codes) {
-        if (codes && codes.length) { handleScanResult(codes[0].rawValue); return; }
-        scanRAF = requestAnimationFrame(scanLoop);
-      }).catch(function () {
-        scanRAF = requestAnimationFrame(scanLoop);
-      });
-    } else {
+  function scheduleScan() {
+    if (scanStream && !scanSheet.hidden && !state.scanPaused && scanRAF === null) {
       scanRAF = requestAnimationFrame(scanLoop);
     }
   }
 
+  function scanLoop() {
+    scanRAF = null;
+    if (!scanStream || scanSheet.hidden || state.scanPaused) return;
+    var generation = scanGeneration;
+    var video = document.getElementById("scanVideo");
+    if (video.readyState < 2) { scheduleScan(); return; }
+    barcodeDetector.detect(video).then(function (codes) {
+      if (generation !== scanGeneration || scanSheet.hidden || !scanStream) return;
+      if (codes && codes.length) handleScanResult(codes[0].rawValue);
+      scheduleScan();
+    }).catch(function () { if (generation === scanGeneration) scheduleScan(); });
+  }
+
   function stopScanCamera() {
+    scanGeneration++;
     if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
     if (scanStream) { scanStream.getTracks().forEach(function (t) { t.stop(); }); scanStream = null; }
   }
 
   function closeScanSheet() {
+    if (scanSaving) return;
     stopScanCamera();
     scanSheet.hidden = true;
   }
@@ -2283,7 +2389,7 @@
 
   document.getElementById("scanModeSegmented").addEventListener("click", function (e) {
     var btn = e.target.closest(".segment");
-    if (!btn) return;
+    if (!btn || state.scanPaused || scanSaving) return;
     document.querySelectorAll("#scanModeSegmented .segment").forEach(function (s) { s.classList.toggle("is-active", s === btn); });
     state.scanMode = btn.dataset.mode;
   });
@@ -2294,7 +2400,7 @@
     el.hidden = false;
     el.innerHTML = state.scanSessionLog.map(function (entry) {
       return '<li class="batch-row"><span class="batch-qty">' + escapeHtml(entry.name) + '</span>' +
-        '<span class="batch-expiry">' + formatQty(entry.qty) + (entry.unit ? " " + entry.unit : "") + '</span></li>';
+        '<span class="batch-expiry">' + formatQty(entry.qty) + (entry.unit ? " " + escapeHtml(entry.unit) : "") + '</span></li>';
     }).join("");
   }
 
@@ -2321,51 +2427,84 @@
     }
 
     document.getElementById("scanMultiQty").value = "1";
+    document.getElementById("scanMultiExpiry").value = "";
+    document.getElementById("scanMultiOpenDate").value = "";
+    document.getElementById("scanMultiExpiryType").value = "use_by";
+    document.getElementById("scanMultiShelfLifeHint").textContent = item && item.openShelfLifeDays
+      ? "Once opened, good for " + item.openShelfLifeDays + " days."
+      : "Set the item's once-opened shelf life in Edit item to enable the countdown.";
     document.getElementById("scanMultiLocation").value = state.scanLastLocation || "";
     renderLocationSuggestions();
     document.getElementById("scanMultiQty").focus();
   }
 
-  document.getElementById("scanMultiAddBtn").addEventListener("click", function () {
-    var code = state.scanMultiCode;
-    var qty = roundQty(Number(document.getElementById("scanMultiQty").value)) || 1;
-    var typedLocationName = document.getElementById("scanMultiLocation").value.trim();
-    if (typedLocationName) state.scanLastLocation = typedLocationName;
-    var locationId = resolveLocationByName(typedLocationName);
+  function resumeMultiScan() {
+    document.getElementById("scanMultiOverlay").hidden = true;
+    state.scanLastHandledAt = Date.now();
+    state.scanPaused = false;
+    scheduleScan();
+  }
 
-    var item = state.scanMultiMatchedItemId ? state.items.find(function (it) { return it.id === state.scanMultiMatchedItemId; }) : null;
+  document.getElementById("scanMultiAddBtn").addEventListener("click", function () {
+    if (scanSaving || !state.scanPaused) return;
+    var qtyInput = document.getElementById("scanMultiQty");
+    var qty = roundQty(Number(qtyInput.value));
+    if (!qtyInput.reportValidity() || !Number.isFinite(qty) || qty <= 0) return;
+    var expiryInput = document.getElementById("scanMultiExpiry");
+    var openInput = document.getElementById("scanMultiOpenDate");
+    if (!expiryInput.reportValidity() || !openInput.reportValidity()) return;
+    var code = state.scanMultiCode;
+    var items = JSON.parse(JSON.stringify(state.items));
+    var locations = JSON.parse(JSON.stringify(state.locations));
+    var item = state.scanMultiMatchedItemId ? items.find(function (it) { return it.id === state.scanMultiMatchedItemId; }) : null;
     if (!item) {
       var typedName = document.getElementById("scanMultiNameInput").value.trim();
       if (!typedName) { alert("Enter a name for this item."); return; }
-      item = state.items.find(function (it) { return it.name.toLowerCase() === typedName.toLowerCase(); });
-      if (item) {
-        if (item.barcodes.indexOf(code) === -1) item.barcodes.push(code);
-      } else {
-        var defaultCatId = state.categories.length ? state.categories[0].id : null;
+      item = items.find(function (it) { return it.name.toLowerCase() === typedName.toLowerCase(); });
+      if (!item) {
         item = {
-          id: uid(), name: typedName, categoryId: defaultCatId, subcategoryId: null, unit: "",
-          reorderThreshold: null, openShelfLifeDays: null, barcodes: [code], batches: [], notes: "",
-          photoIds: [], heroPhotoId: null, updatedAt: new Date().toISOString()
+          id: uid(), name: typedName, categoryId: state.categories.length ? state.categories[0].id : null,
+          subcategoryId: null, unit: "", unitId: null, reorderThreshold: null, openShelfLifeDays: null,
+          barcodes: [], batches: [], notes: "", photoIds: [], heroPhotoId: null
         };
-        state.items.push(item);
+        items.push(item);
       }
+      if (item.barcodes.indexOf(code) === -1) item.barcodes.push(code);
     }
-
-    item.batches.push({ id: uid(), quantity: qty, expiry: null, expiryType: null, openDate: null, locationId: locationId });
+    var locationName = document.getElementById("scanMultiLocation").value.trim();
+    var location = locationName ? locations.find(function (loc) { return loc.name.toLowerCase() === locationName.toLowerCase(); }) : null;
+    if (locationName && !location) {
+      location = { id: uid(), name: locationName, photoIds: [], heroPhotoId: null, photosUpdatedAt: null, updatedAt: new Date().toISOString() };
+      locations.push(location);
+    }
+    item.batches.push({
+      id: uid(), quantity: qty, expiry: expiryInput.value || null,
+      expiryType: expiryInput.value ? document.getElementById("scanMultiExpiryType").value : null,
+      openDate: openInput.value || null, locationId: location ? location.id : null
+    });
     item.updatedAt = new Date().toISOString();
-    saveItems();
-    render();
-
-    state.scanSessionLog.unshift({ name: item.name, qty: qty, unit: item.unit });
-    renderScanSessionLog();
-
-    document.getElementById("scanMultiOverlay").hidden = true;
-    state.scanPaused = false;
+    scanSaving = true;
+    document.getElementById("scanMultiAddBtn").disabled = true;
+    document.getElementById("scanMultiSkipBtn").disabled = true;
+    idbReplaceStores({ items: items, locations: locations, units: state.units }).then(function () {
+      state.items = items;
+      state.locations = locations;
+      state.scanLastLocation = locationName;
+      state.scanSessionLog.unshift({ name: item.name, qty: qty, unit: item.unit });
+      render();
+      renderScanSessionLog();
+      resumeMultiScan();
+    }).catch(function (err) {
+      alert("Couldn't save this batch. Nothing was added; try again: " + err.message);
+    }).finally(function () {
+      scanSaving = false;
+      document.getElementById("scanMultiAddBtn").disabled = false;
+      document.getElementById("scanMultiSkipBtn").disabled = false;
+    });
   });
 
   document.getElementById("scanMultiSkipBtn").addEventListener("click", function () {
-    document.getElementById("scanMultiOverlay").hidden = true;
-    state.scanPaused = false;
+    if (!scanSaving) resumeMultiScan();
   });
 
   function handleScanResult(code) {
@@ -2393,7 +2532,7 @@
     if (state.scanMode === "multi") {
       var now = Date.now();
       if (code === state.scanLastHandledCode && (now - state.scanLastHandledAt) < 3000) {
-        scanRAF = requestAnimationFrame(scanLoop);
+        scheduleScan();
         return;
       }
       state.scanLastHandledCode = code;
@@ -2494,7 +2633,7 @@
     var backup = {
       exportedAt: state.settings.lastExportAt,
       exportedBy: state.settings.deviceName || "",
-      items: state.items, history: state.history, categories: state.categories, locations: state.locations, settings: state.settings
+      items: state.items, history: state.history, categories: state.categories, locations: state.locations, units: state.units, settings: state.settings
     };
     var blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     var url = URL.createObjectURL(blob);
@@ -2539,7 +2678,7 @@
 
   function boot() {
     return migrateFromLocalStorage().then(function () {
-      return Promise.all([idbGetAll("items"), idbGetAll("history"), idbGetAll("categories"), idbGetKV("settings", null), idbGetAll("locations")]);
+      return Promise.all([idbGetAll("items"), idbGetAll("history"), idbGetAll("categories"), idbGetKV("settings", null), idbGetAll("locations"), idbGetAll("units")]);
     }).then(function (results) {
       state.items = results[0];
       state.history = results[1];
@@ -2550,13 +2689,15 @@
       if (state.settings.lastExportAt === undefined) state.settings.lastExportAt = null;
       if (state.settings.lastImportAt === undefined) state.settings.lastImportAt = null;
       state.locations = results[4] || [];
+      state.units = results[5] || [];
 
       var itemsChanged = migrateItems(state.items);
       var historyChanged = migrateHistory(state.history);
       var locChanged1 = migrateBatchLocations(state.items, state.locations);
       var locChanged2 = normalizeLocations(state.locations);
 
-      if (itemsChanged || locChanged1) saveItems();
+      var unitsChanged = normalizeItemUnits(state.items);
+      if (itemsChanged || locChanged1 || unitsChanged) saveItems();
       if (historyChanged) saveHistory();
       if (!catsFromDb.length) saveCategories();
       if (locChanged1 || locChanged2) saveLocations();
